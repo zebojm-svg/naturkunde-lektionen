@@ -5,22 +5,29 @@
   const SUBSTANCES = window.SUBSTANCES;
   const TOOLS = window.TOOLS;
 
-  const MAX = 320;
+  const MAX = 6000;
+  const MAX_PER_GLASS = 900;
   const ROOM = 22;
+  const TEMP_MAX = 4000;
+  const LETTERS = "ABCDEF";
 
   const state = {
     particles: [],
     bonds: [],
     nextId: 1,
     selected: "A",
+    selectedTo: null,
     tool: "pointer",
     pointer: { x: 0, y: 0, down: false },
     magnetGrab: [],
+    magnetJob: null,
     stir: null,
     filter: null,
+    funnelOn: null,
     decant: null,
-    distill: false,
-    funnel: [],
+    distill: null,
+    extractWait: null,
+    cache: {},
     sayUntil: 0,
     sayText: "",
     t: 0,
@@ -28,10 +35,8 @@
     H: 500,
   };
 
-  const vessels = {
-    A: makeVessel("A", "Becherglas A"),
-    B: makeVessel("B", "Becherglas B"),
-  };
+  const vessels = {};
+  vessels.A = makeVessel("A", "Becherglas A");
 
   function makeVessel(id, label) {
     return {
@@ -48,6 +53,14 @@
     };
   }
 
+  function vesselList() {
+    return Object.values(vessels);
+  }
+
+  function vesselIds() {
+    return Object.keys(vessels);
+  }
+
   function inner(v) {
     const tilt = v.tilt || 0;
     return {
@@ -61,17 +74,52 @@
   function layout() {
     const W = state.W;
     const H = state.H;
-    const w = Math.min(168, W * 0.28);
-    const h = Math.min(230, H * 0.62);
-    const y = H * 0.22;
-    vessels.A.x = W * 0.14;
-    vessels.A.y = y;
-    vessels.A.w = w;
-    vessels.A.h = h;
-    vessels.B.x = W * 0.55;
-    vessels.B.y = y;
-    vessels.B.w = w;
-    vessels.B.h = h;
+    const ids = vesselIds();
+    const n = Math.max(1, ids.length);
+    const w = Math.min(150, (W - 28) / (n + 0.35));
+    const h = Math.min(228, H * 0.58);
+    const gap = Math.max(18, Math.min(36, (W - n * w) / (n + 1)));
+    const total = n * w + (n - 1) * gap;
+    let x0 = Math.max(12, (W - total) / 2);
+    const y = H * 0.24;
+    ids.forEach((id) => {
+      const v = vessels[id];
+      const old = { x: v.x, y: v.y, w: v.w, h: v.h };
+      v.x = x0;
+      v.y = y;
+      v.w = w;
+      v.h = h;
+      if (old.w) relocateParticles(id, old, v);
+      x0 += w + gap;
+    });
+  }
+
+  function relocateParticles(id, oldV, newV) {
+    if (!oldV.w || oldV.w < 8) return;
+    particlesIn(id).forEach((p) => {
+      p.x = newV.x + ((p.x - oldV.x) / oldV.w) * newV.w;
+      p.y = newV.y + ((p.y - oldV.y) / oldV.h) * newV.h;
+    });
+  }
+
+  function addVessel() {
+    if (vesselIds().length >= 6) {
+      say("Kein Platz mehr für ein weiteres Glas — zuerst eines leeren.", 2.8);
+      return null;
+    }
+    const id = LETTERS[vesselIds().length];
+    vessels[id] = makeVessel(id, `Becherglas ${id}`);
+    layout();
+    return id;
+  }
+
+  function ensureTarget(from) {
+    if (state.selectedTo && state.selectedTo !== from && vessels[state.selectedTo]) {
+      return state.selectedTo;
+    }
+    const empty = vesselIds().find((id) => id !== from && particlesIn(id).length === 0);
+    if (empty) return empty;
+    return addVessel();
   }
 
   function specOf(p) {
@@ -84,20 +132,41 @@
   }
 
   function vesselAt(x, y) {
-    if (inVessel(vessels.A, x, y)) return "A";
-    if (inVessel(vessels.B, x, y)) return "B";
+    for (const v of vesselList()) {
+      if (inVessel(v, x, y)) return v.id;
+    }
     return null;
   }
 
   function particlesIn(id) {
+    const c = state.cache[id];
+    if (c) return c.all;
     return state.particles.filter((p) => p.vessel === id);
+  }
+
+  function rebuildCache() {
+    const cache = {};
+    vesselIds().forEach((id) => {
+      cache[id] = { all: [], liquids: [], solids: [], types: Object.create(null), surfaceY: 0 };
+    });
+    state.particles.forEach((p) => {
+      const c = cache[p.vessel];
+      if (!c) return;
+      c.all.push(p);
+      c.types[p.type] = true;
+      if (p.phase === "liquid" || p.phase === "dissolved") c.liquids.push(p);
+      else if (p.phase === "solid" || p.phase === "char") c.solids.push(p);
+    });
+    state.cache = cache;
   }
 
   function liquidTop(id) {
     const v = vessels[id];
     if (!v) return 0;
+    const c = state.cache[id];
+    if (c && c.surfaceY) return c.surfaceY;
     const b = inner(v);
-    const liquids = particlesIn(id).filter((p) => p.phase === "liquid" || p.phase === "dissolved");
+    const liquids = (c && c.liquids) || particlesIn(id).filter((p) => p.phase === "liquid" || p.phase === "dissolved");
     const area = Math.max(1, (b.right - b.left) * 0.55);
     const fill = liquids.reduce((s, p) => s + p.r * p.r, 0) / area;
     const h = Math.min(b.bottom - b.top - 8, 18 + fill * 140);
@@ -111,8 +180,9 @@
   }
 
   function spawnParticle(type, vessel, x, y, extras) {
-    if (state.particles.length >= MAX) {
-      say("Das Glas ist voll — zuerst etwas entfernen oder filtrieren.", 2.5);
+    const inGlass = particlesIn(vessel).length;
+    if (inGlass >= MAX_PER_GLASS || state.particles.length >= MAX) {
+      say("Dieses Glas ist voll — zuerst etwas entfernen oder in ein neues Glas filtrieren.", 2.5);
       return null;
     }
     const spec = SUBSTANCES[type];
@@ -136,6 +206,13 @@
       ...extras,
     };
     state.particles.push(p);
+    const c = state.cache[vessel];
+    if (c) {
+      c.all.push(p);
+      c.types[type] = true;
+      if (p.phase === "liquid" || p.phase === "dissolved") c.liquids.push(p);
+      else if (p.phase === "solid" || p.phase === "char") c.solids.push(p);
+    }
     return p;
   }
 
@@ -144,9 +221,15 @@
     state.bonds.push({ a: a.id, b: b.id, rest: Math.max(rest, a.r + b.r), k: k || 48 });
   }
 
-  function addSubstance(type, vesselId, amountScale) {
+  function addSubstance(type, vesselId, amountScale, quiet) {
     const spec = SUBSTANCES[type];
     const v = vessels[vesselId];
+    if (!spec || !v) return;
+    if (spec.mixture) {
+      spec.mixture.forEach((part) => addSubstance(part.type, vesselId, part.scale, true));
+      if (!quiet) say(`${spec.name} ins ${v.label} gegeben — Fetttröpfchen im Wasser (Emulsion).`, 2.4);
+      return;
+    }
     const b = inner(v);
     const n = Math.round(spec.count * (amountScale || 1));
     const clusterN = spec.cluster || 1;
@@ -186,7 +269,7 @@
       }
       made += take;
     }
-    say(`${spec.name} ins ${v.label} gegeben.`, 1.6);
+    if (!quiet) say(`${spec.name} ins ${v.label} gegeben.`, 1.6);
   }
 
   function findP(id) {
@@ -200,9 +283,32 @@
   function solventPresent(p) {
     const spec = specOf(p);
     if (!spec.solubleIn.length) return false;
-    return particlesIn(p.vessel).some(
-      (q) => spec.solubleIn.includes(q.type) && (q.phase === "liquid" || q.phase === "dissolved")
-    );
+    const types = state.cache[p.vessel] && state.cache[p.vessel].types;
+    if (!types) return false;
+    return spec.solubleIn.some((t) => types[t]);
+  }
+
+  function solventPower(soluteType, solventType) {
+    if (soluteType === "sugar" && solventType === "alcohol") return 1;
+    if (soluteType === "fat" && solventType === "gasoline") return 1.15;
+    return 1.35;
+  }
+
+  function remainingDissolveSlots(vesselId, soluteType) {
+    const spec = SUBSTANCES[soluteType];
+    if (!spec || !spec.solubleIn.length) return 0;
+    let cap = 0;
+    let used = 0;
+    particlesIn(vesselId).forEach((q) => {
+      if (q.type === soluteType && q.phase === "dissolved") used++;
+      if (
+        (q.phase === "liquid" || q.phase === "dissolved") &&
+        spec.solubleIn.includes(q.type)
+      ) {
+        cap += solventPower(soluteType, q.type);
+      }
+    });
+    return cap - used;
   }
 
   function updateDissolve(p, dt, v) {
@@ -210,57 +316,182 @@
     if (p.phase === "dissolved") return;
     if (!spec.solubleIn.length) return;
     if (!solventPresent(p)) return;
+    if (remainingDissolveSlots(p.vessel, p.type) <= 0) {
+      if (state.t >= state.sayUntil && spec.id === "sugar") {
+        say("Zu wenig Lösungsmittel — nicht aller Zucker löst sich. Mehr Alkohol oder Wasser nachfüllen.", 3);
+      }
+      return;
+    }
     const stir = state.stir && state.stir.vessel === p.vessel ? 2.6 : 1;
     const heat = 0.7 + (v.temp - ROOM) / 90;
-    p.dissolve += dt * 0.55 * stir * heat;
+    const types = state.cache[p.vessel] && state.cache[p.vessel].types;
+    const alcOnly = !!(types && types.alcohol && !types.water);
+    p.dissolve += dt * 0.55 * stir * heat * (alcOnly ? 0.7 : 1);
     if (p.dissolve > 1) {
+      if (remainingDissolveSlots(p.vessel, p.type) <= 0) return;
       p.phase = "dissolved";
       p.r = Math.max(2.4, spec.r * 0.55);
       breakBondsOf(p.id);
-      if (spec.id === "sugar") say("Zuckerklümpchen zerfallen — der Zucker löst sich im Wasser.", 3);
+      if (spec.id === "sugar") {
+        const inAlc = types && types.alcohol && !types.water;
+        const inWater = types && types.water && !types.alcohol;
+        say(
+          inAlc
+            ? "Zuckerklümpchen zerfallen — der Zucker löst sich im Alkohol."
+            : inWater
+              ? "Zuckerklümpchen zerfallen — der Zucker löst sich im Wasser."
+              : "Zuckerklümpchen zerfallen — der Zucker löst sich.",
+          3
+        );
+      }
       if (spec.id === "salt") say("Salzkristalle zerfallen — das Salz löst sich im Wasser.", 3);
+      if (spec.id === "fat") say("Fett löst sich im Benzin — die gelbe Schicht ist der Extrakt.", 3.2);
     }
   }
 
   function updateMelt(p, v) {
     const spec = specOf(p);
-    if (spec.melt > 0 && spec.melt < 400) {
-      if (v.temp >= spec.melt && p.phase === "solid") {
-        p.phase = "liquid";
-        breakBondsOf(p.id);
-        if (spec.id === "wax") say("Wachs schmilzt und schwimmt als Tropfen oben.", 3);
-      } else if (v.temp < spec.melt - 4 && p.type === "wax" && p.phase === "liquid") {
-        p.phase = "solid";
-      }
+    if (p.phase === "dissolved" || p.phase === "gas" || p.phase === "char") return;
+    const canMelt = spec.melt != null && (spec.boil == null || spec.melt < spec.boil);
+    if (v.temp >= spec.melt && p.phase === "solid" && canMelt) {
+      p.phase = "liquid";
+      p.r = spec.liquidR || Math.max(2.8, spec.r * 0.48);
+      if (spec.decompose) p.caramel = true;
+      breakBondsOf(p.id);
+      if (spec.id === "wax") say("Wachs schmilzt — kleine flüssige Teilchen. Beim Abkühlen wird es wieder fest.", 3.2);
+      else if (spec.id === "sugar") say("Zucker schmilzt und karamellisiert — kleine flüssige Teilchen.", 3.2);
+      else if (spec.melt >= 100) say(`${spec.name} schmilzt bei ${spec.melt} °C.`, 2.8);
+    } else if (
+      spec.phase === "solid" &&
+      p.phase === "liquid" &&
+      !p.charred &&
+      v.temp < spec.melt - 8
+    ) {
+      p.phase = "solid";
+      if (!p.caramel) p.r = spec.r;
     }
   }
 
-  function boilingKind(id) {
-    const list = particlesIn(id);
-    const nAlc = list.filter((p) => p.type === "alcohol" && p.phase === "liquid").length;
-    const nWat = list.filter((p) => p.type === "water" && p.phase === "liquid").length;
-    if (nAlc > 0) return { type: "alcohol", bp: 78 };
-    if (nWat > 0) return { type: "water", bp: 100 };
-    return null;
+  function toChar(p) {
+    p.phase = "char";
+    p.stuck = true;
+    p.caramel = false;
+    p.charred = true;
+    p.r = 2.3;
+    p.vx = 0;
+    p.vy = 0;
+    breakBondsOf(p.id);
   }
 
-  function boilOff(id, type, dt) {
+  function updateDecompose(dt) {
+    vesselList().forEach((v) => {
+      const cand = particlesIn(v.id).filter((p) => {
+        const spec = specOf(p);
+        if (!spec.decompose || p.phase === "char" || p.phase === "gas") return false;
+        return v.temp >= spec.decompose;
+      });
+      if (!cand.length) return;
+      v.charAcc = (v.charAcc || 0) + dt * Math.min(10, 2 + cand.length * 0.1);
+      while (v.charAcc >= 1 && cand.length) {
+        v.charAcc -= 1;
+        toChar(cand.pop());
+      }
+      say("Zucker zersetzt sich — schwarze Kruste am Boden. Das geht nicht zurück, der Rest klebt fest.", 3.6);
+    });
+  }
+
+  function charLayerHeight(id) {
+    const n = particlesIn(id).filter((p) => p.phase === "char").length;
+    if (!n) return 0;
+    return Math.min(26, 5 + n * 0.7);
+  }
+
+  function drawCharLayer(v) {
+    const h = charLayerHeight(v.id);
+    if (h <= 0) return;
+    const b = inner(v);
+    const cx = (b.left + b.right) / 2;
+    ctx.fillStyle = "rgba(12,8,6,.94)";
+    ctx.beginPath();
+    ctx.ellipse(cx, b.bottom - h * 0.22, (b.right - b.left) * 0.48, h * 0.58, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "rgba(6,4,3,.88)";
+    ctx.beginPath();
+    ctx.ellipse(cx, b.bottom - 1.5, (b.right - b.left) * 0.46, Math.max(3.5, h * 0.28), 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function updateCharStick() {
+    vesselIds().forEach((id) => {
+      const v = vessels[id];
+      const layer = charLayerHeight(id);
+      if (!v || layer <= 0) return;
+      const b = inner(v);
+      particlesIn(id).forEach((p) => {
+        if (p.phase === "gas" || p.phase === "char") return;
+        if (p.phase === "liquid" && (p.type === "water" || p.type === "alcohol")) return;
+        if (p.y > b.bottom - layer - p.r * 0.6) {
+          p.stuck = true;
+          p.vx = 0;
+          p.vy = 0;
+        }
+      });
+    });
+  }
+
+  function boilingKind(id) {
+    const list = particlesIn(id).filter((p) => {
+      if (p.phase !== "liquid") return false;
+      const spec = specOf(p);
+      if (spec.decompose || spec.boil == null) return false;
+      return true;
+    });
+    if (!list.length) return null;
+    let best = null;
+    list.forEach((p) => {
+      const bp = specOf(p).boil;
+      if (!best || bp < best.bp) best = { type: p.type, bp, name: specOf(p).name };
+    });
+    return best;
+  }
+
+  function boilOff(id, kind, dt) {
     const v = vessels[id];
-    v.boilAcc = (v.boilAcc || 0) + dt * 2.2;
-    const cand = particlesIn(id).filter((p) => p.type === type && p.phase === "liquid");
+    const cand = particlesIn(id).filter((p) => p.type === kind.type && p.phase === "liquid");
+    v.boilAcc = (v.boilAcc || 0) + dt * Math.min(14, 2.2 + cand.length * 0.05);
     while (v.boilAcc >= 1 && cand.length) {
       v.boilAcc -= 1;
       const p = cand.pop();
       p.phase = "gas";
       p.vy = -40 - Math.random() * 30;
       p.r = specOf(p).r * 1.35;
-      if (state.distill) {
+      if (state.distill && state.distill.from === id) {
         p.vessel = "vapor";
         p.pathT = 0;
       }
     }
-    if (type === "alcohol") say("Alkohol siedet — die Temperatur bleibt bei 78 °C stehen.", 2.8);
-    if (type === "water") say("Wasser siedet bei 100 °C. Dampf steigt auf.", 2.8);
+    if (kind.type === "alcohol") {
+      say(
+        state.distill && state.distill.from === id
+          ? "Alkohol siedet — Dampf geht in den Kühler, Temperatur bleibt bei 78 °C."
+          : "Alkohol siedet und dampft in die Luft (78 °C).",
+        2.8
+      );
+    } else if (kind.type === "water") {
+      say(
+        state.distill && state.distill.from === id
+          ? "Wasser siedet — Dampf geht in den Kühler, Temperatur bleibt bei 100 °C."
+          : "Wasser siedet und dampft in die Luft (100 °C).",
+        2.8
+      );
+    } else if (kind.type === "gasoline") {
+      say(
+        state.distill && state.distill.from === id
+          ? "Benzin siedet — Dampf geht in den Kühler, Fett bleibt zurück."
+          : "Benzin verdampft — das Fett bleibt als Fleck zurück.",
+        3.2
+      );
+    } else say(`${kind.name} siedet bei ${kind.bp} °C — die Temperatur bleibt stehen.`, 2.8);
   }
 
   function crystallizeIfDry(id) {
@@ -273,30 +504,45 @@
         p.r = specOf(p).r;
         p.dissolve = 0;
       }
+      if (p.phase === "dissolved" && p.type === "fat") {
+        p.phase = "liquid";
+        p.r = specOf(p).r;
+      }
     });
   }
 
   function updateHeat(dt) {
-    Object.values(vessels).forEach((v) => {
-      const boil = boilingKind(v.id);
+    vesselList().forEach((v) => {
       if (v.heating) {
-        if (boil && v.temp >= boil.bp - 0.4) {
+        const boil = boilingKind(v.id);
+        if (boil && v.temp >= boil.bp - 0.5) {
           v.temp = boil.bp;
-          boilOff(v.id, boil.type, dt);
+          boilOff(v.id, boil, dt);
         } else {
-          v.temp = Math.min(130, v.temp + dt * 14);
+          let rate = 14 + Math.max(0, v.temp) * 0.12;
+          if (v.temp > 120) rate = 8 + (v.temp - 120) * 0.03;
+          v.temp = Math.min(TEMP_MAX, v.temp + dt * rate);
         }
-      } else {
-        v.temp += (ROOM - v.temp) * dt * 0.12;
+      } else if (v.temp > ROOM) {
+        v.temp += (ROOM - v.temp) * dt * 0.18;
+        if (v.temp < ROOM + 0.3) v.temp = ROOM;
       }
-      if (!v.heating && boil && v.temp > boil.bp) v.temp = boil.bp;
       crystallizeIfDry(v.id);
     });
   }
 
+  function distillPair() {
+    if (!state.distill) return null;
+    const a = vessels[state.distill.from];
+    const b = vessels[state.distill.to];
+    if (!a || !b) return null;
+    return { a, b };
+  }
+
   function distillPath(t) {
-    const a = vessels.A;
-    const b = vessels.B;
+    const pair = distillPair();
+    if (!pair) return { x: 0, y: 0, condensing: true };
+    const { a, b } = pair;
     const x0 = a.x + a.w * 0.55;
     const y0 = a.y + 8;
     const x1 = a.x + a.w * 0.55;
@@ -331,11 +577,11 @@
         p.y = pos.y + (Math.random() - 0.5) * 6;
         if (pos.condensing || p.pathT >= 1) {
           p.phase = "liquid";
-          p.vessel = "B";
+          p.vessel = state.distill ? state.distill.to : "A";
           p.r = specOf(p).r;
           p.vx = 0;
           p.vy = 20;
-          say("Dampf wird im Kühler wieder flüssig — Destillat in Becherglas B.", 3);
+          say(`Dampf wird im Kühler wieder flüssig — Destillat in ${vessels[p.vessel]?.label || "Becherglas B"}.`, 3);
         }
         return;
       }
@@ -389,41 +635,73 @@
   }
 
   function updateMagnet(dt) {
-    if (state.tool !== "magnet") {
-      if (state.magnetGrab.length) {
-        const v = vesselAt(state.pointer.x, state.pointer.y) || state.selected;
-        state.magnetGrab.forEach((id) => {
-          const p = findP(id);
-          if (p) p.vessel = v;
-        });
-        state.magnetGrab = [];
-      }
+    const job = state.magnetJob;
+    if (!job) return;
+    job.t += dt;
+    const from = vessels[job.from];
+    const to = vessels[job.to];
+    if (!from || !to) {
+      state.magnetJob = null;
       return;
     }
-    const mx = state.pointer.x;
-    const my = state.pointer.y;
-    state.particles.forEach((p) => {
-      if (!specOf(p).magnetic) return;
-      const d = Math.hypot(p.x - mx, p.y - my);
-      if (d < 130 || state.magnetGrab.includes(p.id)) {
-        p.vx += ((mx - p.x) * 14 - p.vx) * dt * 8;
-        p.vy += ((my - p.y + 18) * 14 - p.vy) * dt * 8;
-        if (d < 22 && !state.magnetGrab.includes(p.id)) {
+    if (job.phase === "attract") {
+      job.x = from.x + from.w * 0.5;
+      job.y = from.y - 8;
+      particlesIn(job.from).forEach((p) => {
+        if (!specOf(p).magnetic) return;
+        p.vx += ((job.x - p.x) * 16 - p.vx) * dt * 6;
+        p.vy += ((job.y + 20 - p.y) * 16 - p.vy) * dt * 6;
+        if (Math.hypot(p.x - job.x, p.y - (job.y + 18)) < 26 && !state.magnetGrab.includes(p.id)) {
           state.magnetGrab.push(p.id);
           p.vessel = "magnet";
-          say("Eisenpulver klebt am Magnet — Aluminium bleibt liegen.", 3);
         }
+      });
+      if (job.t > 1.7) {
+        particlesIn(job.from).forEach((p) => {
+          if (!specOf(p).magnetic) return;
+          if (!state.magnetGrab.includes(p.id)) state.magnetGrab.push(p.id);
+          p.vessel = "magnet";
+        });
+        job.phase = "carry";
+        job.t = 0;
+        if (state.magnetGrab.length) say("Eisenpulver klebt am Magnet — Aluminium bleibt liegen.", 3);
+        else say("Kein magnetischer Stoff in diesem Glas.", 2.4);
       }
-    });
+    } else if (job.phase === "carry") {
+      const tx = to.x + to.w * 0.5;
+      const ty = to.y - 8;
+      job.x += (tx - job.x) * Math.min(1, dt * 4);
+      job.y += (ty - job.y) * Math.min(1, dt * 4);
+      if (job.t > 1.15) {
+        state.magnetGrab.forEach((id) => {
+          const p = findP(id);
+          if (!p) return;
+          p.vessel = job.to;
+          p.x = to.x + to.w * 0.5 + (Math.random() - 0.5) * 28;
+          p.y = to.y + 40;
+          p.vy = 30;
+        });
+        state.magnetGrab = [];
+        state.magnetJob = null;
+        if (job.hadIron !== false) say(`Eisen liegt in ${to.label}.`, 2.6);
+      }
+    }
     state.magnetGrab.forEach((id, i) => {
       const p = findP(id);
-      if (!p) return;
-      p.x = mx + Math.cos(i * 1.1) * 8;
-      p.y = my + 20 + Math.sin(i * 1.1) * 8;
+      if (!p || !job) return;
+      p.x = job.x + Math.cos(i * 1.1) * 8;
+      p.y = job.y + 22 + Math.sin(i * 1.1) * 8;
       p.vx = 0;
       p.vy = 0;
       p.vessel = "magnet";
     });
+  }
+
+  function funnelAnchor() {
+    const id = (state.filter && state.filter.to) || state.funnelOn;
+    const v = vessels[id];
+    if (!v) return null;
+    return { x: v.x + v.w * 0.5, y: v.y - 6, v };
   }
 
   function updateStir(dt) {
@@ -451,10 +729,12 @@
     f.t += dt;
     const from = f.from;
     const to = f.to;
-    const funnelX = (vessels.A.x + vessels.A.w + vessels.B.x) / 2;
-    const funnelY = vessels.A.y + 8;
+    const anchor = funnelAnchor();
+    const funnelX = anchor ? anchor.x : 0;
+    const funnelY = anchor ? anchor.y + 14 : 0;
     if (!f.started) {
       f.started = true;
+      state.funnelOn = to;
       particlesIn(from).forEach((p) => {
         p.vessel = "transit";
         p.pass = canPassFilter(p);
@@ -483,17 +763,18 @@
       });
       state.filter = null;
       const n = state.particles.filter((p) => p.vessel === "funnel").length;
+      if (!n) state.funnelOn = null;
       say(
         n
-          ? `Filtrat in ${vessels[to].label}. Rückstand bleibt im Filter.`
-          : `Alles ist durch den Filter gelaufen.`,
+          ? `Filtrat in ${vessels[to].label}. Rückstand im Filter — Filter antippen: neues Glas für den Rückstand.`
+          : `Alles ist durch den Filter in ${vessels[to].label} gelaufen.`,
         3.5
       );
     }
   }
 
   function canPassFilter(p) {
-    if (p.adsorbedTo) return false;
+    if (p.adsorbedTo || p.stuck || p.phase === "char") return false;
     if (p.phase === "dissolved" || p.phase === "liquid" || p.phase === "gas") return true;
     return !!specOf(p).passesFilter;
   }
@@ -517,7 +798,7 @@
       if (p.vessel !== "transit") return;
       p.x += (targetX - p.x) * dt * 2.5;
       p.y += (targetY - p.y) * dt * 1.6;
-      if (p.x > (from.x + from.w + to.x) / 2) {
+      if (Math.hypot(p.x - targetX, p.y - targetY) < 36) {
         p.vessel = to.id;
         p.vy = 30;
       }
@@ -527,12 +808,20 @@
         if (p.vessel === "transit") p.vessel = to.id;
       });
       from.tilt = 0;
+      const extracted = d.mode === "extract";
       state.decant = null;
-      say("Flüssigkeit (und was schwimmt) wurde abgegossen — Dekantieren.", 3);
+      say(
+        extracted
+          ? `Extrakt in ${to.label} — gelbe Schicht (Fett in Benzin). Die wässrige Milch bleibt zurück. Benzin erhitzen: Fettfleck.`
+          : "Flüssigkeit (und was schwimmt) wurde abgegossen — Dekantieren.",
+        3.4
+      );
     }
   }
 
   function canDecant(p, fromId) {
+    if (state.decant && state.decant.mode === "extract") return canExtract(p);
+    if (p.phase === "char" || p.stuck) return false;
     if (p.phase === "liquid" || p.phase === "dissolved" || p.phase === "gas") return true;
     const spec = specOf(p);
     if (spec.density < 0.5) return true;
@@ -542,21 +831,70 @@
     return false;
   }
 
+  function canExtract(p) {
+    if (p.stuck || p.phase === "char" || p.phase === "gas") return false;
+    if (p.type === "gasoline") return true;
+    if (p.type === "fat" && p.phase === "dissolved") return true;
+    return false;
+  }
+
+  function vesselHasType(id, type) {
+    const types = state.cache[id] && state.cache[id].types;
+    if (types && types[type]) return true;
+    return particlesIn(id).some((p) => p.type === type);
+  }
+
+  function mixesInVessel(p, vesselId) {
+    const spec = specOf(p);
+    const partners = spec.mixesWith;
+    if (!partners || !partners.length) return false;
+    if (p.phase !== "liquid" && p.phase !== "dissolved") return false;
+    const types = state.cache[vesselId] && state.cache[vesselId].types;
+    if (!types) return false;
+    return partners.some((t) => types[t]);
+  }
+
+  function mixDensity(p, vesselId) {
+    const spec = specOf(p);
+    const types = state.cache[vesselId] && state.cache[vesselId].types;
+    const gasD = SUBSTANCES.gasoline ? SUBSTANCES.gasoline.density : 0.74;
+    if (p.phase === "dissolved") {
+      if (spec.solubleIn && spec.solubleIn.includes("gasoline") && types && types.gasoline) return gasD;
+      return 1;
+    }
+    if (mixesInVessel(p, vesselId)) {
+      if (p.type === "gasoline" || (spec.mixesWith && spec.mixesWith.includes("gasoline"))) return gasD;
+      return 1;
+    }
+    if (spec.emulsifyIn && types && spec.emulsifyIn.some((t) => types[t])) {
+      if (!(types.gasoline && spec.solubleIn && spec.solubleIn.includes("gasoline") && p.phase === "dissolved")) {
+        return 1;
+      }
+    }
+    return spec.density;
+  }
+
+  function brownianStrength(p, temp) {
+    const tK = Math.min(3.2, 0.45 + temp / 70);
+    if (p.phase === "solid") return 0.2 * tK;
+    if (p.phase === "gas") return 10 * tK;
+    return 5.5 * tK;
+  }
+
   function applyPhysics(dt) {
-    const g = 520;
+    const g = 1400;
     state.particles.forEach((p) => {
       if (p.vessel === "magnet" || p.vessel === "vapor" || p.vessel === "transit") return;
       if (p.adsorbedTo) return;
-      const spec = specOf(p);
       const v = vessels[p.vessel];
       if (!v) {
         if (p.vessel === "funnel") {
-          p.vy += g * 0.15 * dt;
-          p.vx *= 0.9;
+          p.vy += g * 0.2 * dt;
+          p.vx *= 0.88;
           p.x += p.vx * dt;
           p.y += p.vy * dt;
-          const fx = (vessels.A.x + vessels.A.w + vessels.B.x) / 2;
-          const fy = vessels.A.y + 18;
+          const fx = funnelAnchor()?.x ?? p.x;
+          const fy = (funnelAnchor()?.y ?? p.y) + 18;
           p.x += (fx - p.x) * dt * 2;
           p.y = Math.min(fy + 48, Math.max(fy, p.y));
           return;
@@ -564,51 +902,100 @@
         return;
       }
       const b = inner(v);
-      const ltop = liquidTop(v.id);
-      const inLiq = p.y > ltop - 4 && p.phase !== "gas";
-      const brown = (v.temp / 26) * (p.phase === "gas" ? 3 : p.phase === "liquid" || p.phase === "dissolved" ? 1.2 : 0.35);
-      p.vx += (Math.random() - 0.5) * brown * 90 * dt;
-      p.vy += (Math.random() - 0.5) * brown * 70 * dt;
+      if (p.phase === "char" || p.stuck) {
+        const layer = p.phase === "char" ? charLayerHeight(v.id) : 0;
+        p.vx = 0;
+        p.vy = 0;
+        if (p.x < b.left + p.r) p.x = b.left + p.r;
+        if (p.x > b.right - p.r) p.x = b.right - p.r;
+        p.y = Math.min(b.bottom - p.r * 0.45, Math.max(b.bottom - (layer || 8) - p.r, p.y));
+        if (p.y > b.bottom - p.r * 0.45) p.y = b.bottom - p.r * 0.45;
+        return;
+      }
+      const liquidish = p.phase === "liquid" || p.phase === "dissolved";
+      const dens = specOf(p).density;
 
       if (p.phase === "gas") {
-        p.vy -= 90 * dt;
+        p.vy -= 110 * dt;
       } else {
-        const dens = p.phase === "dissolved" ? 1.02 : spec.density;
-        if (inLiq) {
-          p.vy += g * dt * Math.max(-2.2, Math.min(2.8, dens - 1)) * 0.55;
-          p.vy += g * dt * 0.08;
-        } else {
-          p.vy += g * dt;
-        }
+        p.vy += g * dt;
       }
 
-      const drag = inLiq ? 5.5 : p.phase === "gas" ? 1.4 : 0.7;
+      const drag = p.phase === "gas" ? 1.2 : liquidish ? 2.2 : 0.7;
       p.vx *= Math.max(0, 1 - drag * dt);
       p.vy *= Math.max(0, 1 - drag * dt);
+
+      const brown = brownianStrength(p, v.temp);
+      p.vx += (Math.random() - 0.5) * brown * (liquidish ? 0.7 : 1);
+      if (!liquidish) p.vy += (Math.random() - 0.5) * brown * 0.25;
+      else if (v.temp > 80) p.vy -= Math.random() * (v.temp - 80) * 0.12;
+
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.rot += p.spin * dt;
 
       if (p.x < b.left + p.r) {
         p.x = b.left + p.r;
-        p.vx *= -0.25;
+        p.vx *= -0.15;
       }
       if (p.x > b.right - p.r) {
         p.x = b.right - p.r;
-        p.vx *= -0.25;
+        p.vx *= -0.15;
       }
       if (p.y > b.bottom - p.r) {
         p.y = b.bottom - p.r;
-        p.vy *= -0.18;
-        p.vx *= 0.86;
+        if (p.vy > 0) p.vy = 0;
+        p.vx *= 0.85;
       }
       if (p.y < b.top + p.r && p.phase !== "gas") {
         p.y = b.top + p.r;
-        p.vy *= 0.2;
+        p.vy *= 0.1;
+      }
+
+      if (p.phase === "solid" && dens < 1) {
+        const surface = state.cache[v.id] && state.cache[v.id].surfaceY;
+        if (surface && p.y > surface - p.r) {
+          p.y = surface - p.r;
+          if (p.vy > 0) p.vy *= -0.2;
+        }
       }
 
       updateDissolve(p, dt, v);
       updateMelt(p, v);
+    });
+  }
+
+  function settleLiquids(dt) {
+    const stirring = state.stir && state.stir.vessel;
+    vesselIds().forEach((id) => {
+      const v = vessels[id];
+      const c = state.cache[id];
+      if (!v || !c || !c.liquids.length) {
+        if (c && v) c.surfaceY = inner(v).bottom;
+        return;
+      }
+      if (stirring === id) return;
+      const b = inner(v);
+      const cols = Math.max(6, Math.floor((b.right - b.left) / 7));
+      const colW = (b.right - b.left) / cols;
+      const heights = new Float32Array(cols);
+      const hot = v.temp > 90;
+      const k = Math.min(1, dt * (hot ? 4 : 10));
+      c.liquids.sort((a, b) => mixDensity(b, id) - mixDensity(a, id));
+      c.liquids.forEach((p) => {
+        if (p.phase !== "liquid" && p.phase !== "dissolved") return;
+        let col = Math.floor((p.x - b.left) / colW);
+        if (col < 0) col = 0;
+        if (col >= cols) col = cols - 1;
+        const target = b.bottom - p.r - heights[col];
+        p.y += (target - p.y) * k;
+        if (p.y > b.bottom - p.r) p.y = b.bottom - p.r;
+        if (p.y < b.top + p.r) p.y = b.top + p.r;
+        heights[col] += p.r * 1.45;
+      });
+      let maxH = 0;
+      for (let i = 0; i < cols; i++) if (heights[i] > maxH) maxH = heights[i];
+      c.surfaceY = b.bottom - maxH;
     });
   }
 
@@ -641,36 +1028,49 @@
   }
 
   function collide() {
-    const list = state.particles.filter((p) => p.vessel !== "vapor" && p.phase !== "gas");
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const a = list[i];
-        const b = list[j];
-        if (a.vessel !== b.vessel) continue;
-        if (a.vessel === "transit" || a.vessel === "funnel") continue;
-        if (a.adsorbedTo || b.adsorbedTo) continue;
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const min = a.r + b.r;
-        const d2 = dx * dx + dy * dy;
-        if (d2 >= min * min || d2 === 0) continue;
-        const dist = Math.sqrt(d2);
-        const overlap = (min - dist) * 0.46;
-        const nx = dx / dist;
-        const ny = dy / dist;
-        const ma = specOf(a).density;
-        const mb = specOf(b).density;
-        const s = ma + mb;
-        a.x -= nx * overlap * (mb / s);
-        a.y -= ny * overlap * (mb / s);
-        b.x += nx * overlap * (ma / s);
-        b.y += ny * overlap * (ma / s);
-        const dv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
-        if (dv < 0) {
-          a.vx += nx * dv * 0.35;
-          a.vy += ny * dv * 0.35;
-          b.vx -= nx * dv * 0.35;
-          b.vy -= ny * dv * 0.35;
+    const cell = 18;
+    const grid = new Map();
+    const key = (x, y) => x + ":" + y;
+    const solids = [];
+    state.particles.forEach((p) => {
+      if (p.phase !== "solid" || p.adsorbedTo || p.stuck) return;
+      if (p.vessel === "vapor" || p.vessel === "transit" || p.vessel === "funnel" || p.vessel === "magnet") return;
+      solids.push(p);
+      const cx = Math.floor(p.x / cell);
+      const cy = Math.floor(p.y / cell);
+      const k = key(cx, cy);
+      let bucket = grid.get(k);
+      if (!bucket) {
+        bucket = [];
+        grid.set(k, bucket);
+      }
+      bucket.push(p);
+    });
+    for (let i = 0; i < solids.length; i++) {
+      const a = solids[i];
+      const cx = Math.floor(a.x / cell);
+      const cy = Math.floor(a.y / cell);
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          const bucket = grid.get(key(cx + ox, cy + oy));
+          if (!bucket) continue;
+          for (let j = 0; j < bucket.length; j++) {
+            const b = bucket[j];
+            if (b.id <= a.id || a.vessel !== b.vessel) continue;
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const min = a.r + b.r;
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= min * min || d2 === 0) continue;
+            const dist = Math.sqrt(d2);
+            const overlap = (min - dist) * 0.5;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            a.x -= nx * overlap;
+            a.y -= ny * overlap;
+            b.x += nx * overlap;
+            b.y += ny * overlap;
+          }
         }
       }
     }
@@ -680,6 +1080,7 @@
     if (state.t < state.sayUntil) return;
     const id = state.selected;
     const v = vessels[id];
+    if (!v) return;
     const list = particlesIn(id);
     if (!list.length) {
       observeEl.textContent = `${v.label} ist leer. Stoff rechts antippen, um Teilchen einzufüllen.`;
@@ -688,8 +1089,9 @@
     const names = {};
     list.forEach((p) => {
       const n = specOf(p).name;
-      names[n] = names[n] || { n, solid: 0, liq: 0, dis: 0, gas: 0 };
-      if (p.phase === "solid") names[n].solid++;
+      names[n] = names[n] || { n, solid: 0, liq: 0, dis: 0, gas: 0, char: 0 };
+      if (p.phase === "char") names[n].char++;
+      else if (p.phase === "solid") names[n].solid++;
       else if (p.phase === "dissolved") names[n].dis++;
       else if (p.phase === "gas") names[n].gas++;
       else names[n].liq++;
@@ -700,17 +1102,35 @@
       if (x.liq) st.push("flüssig");
       if (x.dis) st.push("gelöst");
       if (x.gas) st.push("gasförmig");
+      if (x.char) st.push("zersetzt");
       return `${x.n} (${st.join(", ")})`;
     });
     const extra = [];
-    if (v.heating) extra.push("Brenner an");
+    if (v.heating) extra.push("Brenner an — nochmals Brenner tippen = aus");
     if (state.distill) extra.push("Destillation aufgebaut");
-    if (state.particles.some((p) => p.vessel === "funnel")) extra.push("Rückstand im Filter");
+    if (state.particles.some((p) => p.vessel === "funnel")) extra.push("Rückstand im Filter — Filter tippen");
     observeEl.textContent = `${v.label}, ${Math.round(v.temp)} °C: ${bits.join(" · ")}${extra.length ? " — " + extra.join(", ") : ""}`;
   }
 
   function drawParticle(p) {
     const spec = specOf(p);
+    if (p.phase === "char") {
+      ctx.fillStyle = "#16110c";
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, p.r * 1.5, p.r * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    const liquidish = p.phase === "liquid" || p.phase === "dissolved" || p.phase === "gas";
+    if (liquidish || p.caramel) {
+      ctx.globalAlpha = p.phase === "gas" ? 0.32 : p.phase === "dissolved" ? 0.72 : 0.82;
+      ctx.fillStyle = p.caramel ? "#c56a18" : spec.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      return;
+    }
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(p.rot);
@@ -816,27 +1236,6 @@
     ctx.closePath();
   }
 
-  function drawLiquidTint(v) {
-    const list = particlesIn(v.id);
-    if (!list.length) return;
-    const waters = list.filter((p) => p.type === "water" && p.phase !== "gas").length;
-    const alcs = list.filter((p) => p.type === "alcohol" && p.phase !== "gas").length;
-    const inks = list.filter((p) => p.type === "ink").length;
-    if (!waters && !alcs && !inks) return;
-    const top = liquidTop(v.id);
-    const b = inner(v);
-    ctx.save();
-    beakerPath(v);
-    ctx.clip();
-    let col = "rgba(61,155,233,0.16)";
-    if (alcs && waters) col = "rgba(70,180,190,0.16)";
-    else if (alcs) col = "rgba(94,207,179,0.16)";
-    if (inks) col = "rgba(91,44,145,0.22)";
-    ctx.fillStyle = col;
-    ctx.fillRect(b.left - 8, top, b.right - b.left + 16, b.bottom - top + 12);
-    ctx.restore();
-  }
-
   function drawBeaker(v) {
     const { x, y, w, h } = v;
     ctx.save();
@@ -858,8 +1257,9 @@
     ctx.fillStyle = glass;
     beakerPath(v);
     ctx.fill();
-    ctx.strokeStyle = state.selected === v.id ? "#0e7ab4" : "rgba(40,70,90,.55)";
-    ctx.lineWidth = state.selected === v.id ? 3 : 1.5;
+    ctx.strokeStyle =
+      state.selected === v.id ? "#0e7ab4" : state.selectedTo === v.id ? "#e36b1e" : "rgba(40,70,90,.55)";
+    ctx.lineWidth = state.selected === v.id || state.selectedTo === v.id ? 3 : 1.5;
     ctx.stroke();
 
     ctx.strokeStyle = "rgba(40,70,90,.28)";
@@ -878,10 +1278,20 @@
     ctx.strokeStyle = "rgba(40,70,90,.4)";
     ctx.strokeRect(x + 10, y + 8, w - 20, 10);
 
-    ctx.fillStyle = state.selected === v.id ? "#0e7ab4" : "#33444c";
+    ctx.fillStyle = state.selected === v.id ? "#0e7ab4" : state.selectedTo === v.id ? "#b84f0f" : "#33444c";
     ctx.font = "700 13px Segoe UI";
     ctx.textAlign = "center";
     ctx.fillText(v.label, x + w / 2, y + h + 22);
+    if (state.selected === v.id || state.selectedTo === v.id) {
+      const mark = state.selected === v.id ? "1" : "2";
+      ctx.beginPath();
+      ctx.arc(x + w - 8, y + 4, 11, 0, Math.PI * 2);
+      ctx.fillStyle = mark === "1" ? "#0e7ab4" : "#e36b1e";
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.font = "700 12px Segoe UI";
+      ctx.fillText(mark, x + w - 8, y + 8);
+    }
     ctx.restore();
   }
 
@@ -904,6 +1314,17 @@
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+    ctx.fillStyle = "#1a2428";
+    ctx.font = "700 11px Segoe UI";
+    ctx.textAlign = "center";
+    ctx.fillText("Brenner aus", x, y + 44);
+  }
+
+  function burnerHit(v, px, py) {
+    if (!v.heating) return false;
+    const x = v.x + v.w / 2;
+    const y = v.y + v.h + 28;
+    return Math.hypot(px - x, py - y) < 52;
   }
 
   function drawThermo(v) {
@@ -917,18 +1338,18 @@
     ctx.moveTo(x, top);
     ctx.lineTo(x, bot);
     ctx.stroke();
-    ctx.fillStyle = "#d94c3d";
+    ctx.fillStyle = v.temp > 800 ? "#f4e19c" : "#d94c3d";
     ctx.beginPath();
     ctx.arc(x, bot + 6, 6, 0, Math.PI * 2);
     ctx.fill();
-    const frac = Math.max(0, Math.min(1, (v.temp - 0) / 120));
-    ctx.strokeStyle = "#d94c3d";
+    const frac = Math.max(0, Math.min(1, Math.log10(1 + v.temp) / Math.log10(1 + TEMP_MAX)));
+    ctx.strokeStyle = v.temp > 800 ? "#f4e19c" : "#d94c3d";
     ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.moveTo(x, bot);
     ctx.lineTo(x, bot - (bot - top) * frac);
     ctx.stroke();
-    ctx.fillStyle = "#1a2428";
+    ctx.fillStyle = v.temp >= 400 ? "#b84f0f" : "#1a2428";
     ctx.font = "700 14px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(`${Math.round(v.temp)} °C`, x + 10, top + 8);
@@ -936,32 +1357,34 @@
 
   function drawFunnel() {
     const residue = state.particles.some((p) => p.vessel === "funnel") || state.filter;
-    if (!residue && state.tool !== "filter") return;
-    const fx = (vessels.A.x + vessels.A.w + vessels.B.x) / 2;
-    const fy = vessels.A.y - 6;
-    ctx.fillStyle = "rgba(180,210,225,.45)";
-    ctx.strokeStyle = "rgba(40,70,90,.55)";
+    if (!residue) return;
+    const a = funnelAnchor();
+    if (!a) return;
+    const fx = a.x;
+    const fy = a.y;
+    ctx.fillStyle = "rgba(180,210,225,.55)";
+    ctx.strokeStyle = "rgba(40,70,90,.65)";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(fx - 38, fy);
-    ctx.lineTo(fx + 38, fy);
-    ctx.lineTo(fx + 8, fy + 48);
-    ctx.lineTo(fx + 8, fy + 70);
-    ctx.lineTo(fx - 8, fy + 70);
-    ctx.lineTo(fx - 8, fy + 48);
+    ctx.moveTo(fx - 36, fy);
+    ctx.lineTo(fx + 36, fy);
+    ctx.lineTo(fx + 7, fy + 44);
+    ctx.lineTo(fx + 7, fy + 72);
+    ctx.lineTo(fx - 7, fy + 72);
+    ctx.lineTo(fx - 7, fy + 44);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = "#b84f0f";
     ctx.font = "700 11px Segoe UI";
     ctx.textAlign = "center";
-    ctx.fillText("Filter", fx, fy - 6);
+    ctx.fillText("Filter", fx, fy - 8);
   }
 
   function drawDistill() {
-    if (!state.distill && state.tool !== "distill") return;
-    const a = vessels.A;
-    const b = vessels.B;
+    const pair = distillPair();
+    if (!pair) return;
+    const { a, b } = pair;
     ctx.strokeStyle = "rgba(80,120,150,.7)";
     ctx.lineWidth = 6;
     ctx.lineCap = "round";
@@ -983,10 +1406,7 @@
     ctx.fillText("Kühler", b.x + b.w * 0.45 - 48, b.y - 18);
   }
 
-  function drawMagnet() {
-    if (state.tool !== "magnet") return;
-    const x = state.pointer.x;
-    const y = state.pointer.y;
+  function drawMagnetIcon(x, y) {
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(-0.4);
@@ -999,9 +1419,14 @@
     ctx.restore();
   }
 
+  function drawMagnet() {
+    if (state.magnetJob) drawMagnetIcon(state.magnetJob.x, state.magnetJob.y);
+  }
+
   function drawStir() {
     if (!state.stir) return;
     const v = vessels[state.stir.vessel];
+    if (!v) return;
     const b = inner(v);
     const cx = (b.left + b.right) / 2;
     const cy = (b.top + b.bottom) / 2;
@@ -1020,33 +1445,34 @@
   function render() {
     drawBench();
     drawDistill();
+    vesselList().forEach(drawBeaker);
     drawFunnel();
-    drawBeaker(vessels.A);
-    drawBeaker(vessels.B);
-    drawLiquidTint(vessels.A);
-    drawLiquidTint(vessels.B);
     drawStir();
-    const inside = [];
+    const ids = vesselIds();
+    const byVessel = {};
+    ids.forEach((id) => {
+      byVessel[id] = [];
+    });
     const outside = [];
     state.particles.forEach((p) => {
-      if (p.vessel === "A" || p.vessel === "B") inside.push(p);
+      if (byVessel[p.vessel]) byVessel[p.vessel].push(p);
       else outside.push(p);
     });
-    inside.sort((a, b) => a.y - b.y);
-    ["A", "B"].forEach((id) => {
+    ids.forEach((id) => {
       const v = vessels[id];
+      const list = byVessel[id];
+      list.sort((a, b) => a.y - b.y);
       ctx.save();
       beakerPath(v);
       ctx.clip();
-      inside.filter((p) => p.vessel === id).forEach(drawParticle);
+      drawCharLayer(v);
+      list.forEach(drawParticle);
       ctx.restore();
     });
     outside.sort((a, b) => a.y - b.y);
     outside.forEach(drawParticle);
-    drawBurner(vessels.A);
-    drawBurner(vessels.B);
-    drawThermo(vessels.A);
-    drawThermo(vessels.B);
+    vesselList().forEach(drawBurner);
+    vesselList().forEach(drawThermo);
     drawMagnet();
     ctx.fillStyle = "rgba(26,36,40,.55)";
     ctx.font = "600 12px Segoe UI";
@@ -1055,28 +1481,15 @@
   }
 
   function toolTip() {
-    switch (state.tool) {
-      case "pointer":
-        return "Becherglas antippen = auswählen. Stoff rechts = einfüllen.";
-      case "stir":
-        return "Rühren: Becherglas antippen.";
-      case "heat":
-        return "Brenner: Becherglas antippen (an/aus).";
-      case "thermo":
-        return "Thermometer: ins Becherglas stellen / herausnehmen.";
-      case "filter":
-        return "Filtrieren: zuerst Gemisch, dann Auffangglas antippen.";
-      case "distill":
-        return "Destillieren: Apparatur an/aus. Dann Brenner unter A.";
-      case "magnet":
-        return "Magnet über das Glas ziehen, dann über dem Zielglas loslassen.";
-      case "decant":
-        return "Dekantieren: zuerst volles Glas, dann Auffangglas.";
-      case "empty":
-        return "Leeren: Becherglas antippen (Teilchen weg).";
-      default:
-        return "";
+    const src = vessels[state.selected];
+    const dst = vessels[state.selectedTo];
+    if (dst && src) {
+      return `${src.label} → ${dst.label}. Jetzt Werkzeug links tippen (z. B. Filtrieren).`;
     }
+    if (src) {
+      return `${src.label} gewählt. Stoff rechts einfüllen — oder Werkzeug: Filter/Destillieren erzeugt ein zweites Glas.`;
+    }
+    return "Becherglas antippen, dann Stoff oder Werkzeug wählen.";
   }
 
   let last = performance.now();
@@ -1084,14 +1497,19 @@
     const dt = Math.min(0.033, (now - last) / 1000);
     last = now;
     state.t += dt;
+    rebuildCache();
     updateHeat(dt);
+    updateDecompose(dt);
     updateStir(dt);
+    updateExtractWait(dt);
     updateFilter(dt);
     updateDecant(dt);
     updateVapor(dt);
     applyPhysics(dt);
+    settleLiquids(dt);
     solveBonds(dt);
     collide();
+    updateCharStick();
     updateAdsorb();
     updateMagnet(dt);
     autoObserve();
@@ -1116,110 +1534,67 @@
     return { x: src.clientX - r.left, y: src.clientY - r.top };
   }
 
-  let filterPick = null;
-  let decantPick = null;
+  function selectVessel(id) {
+    if (state.selected && state.selected !== id && !state.selectedTo) {
+      state.selectedTo = id;
+      say(`${vessels[state.selected].label} → ${vessels[id].label}. Jetzt links ein Werkzeug tippen.`, 3);
+      return;
+    }
+    state.selected = id;
+    state.selectedTo = null;
+  }
+
+  function dumpFunnel(dest) {
+    if (!vessels[dest]) return;
+    let n = 0;
+    const v = vessels[dest];
+    state.particles.forEach((p) => {
+      if (p.vessel !== "funnel") return;
+      p.vessel = dest;
+      p.x = v.x + v.w * 0.5 + (Math.random() - 0.5) * 28;
+      p.y = v.y + 40;
+      p.vy = 40;
+      n++;
+    });
+    if (n) {
+      state.funnelOn = null;
+      state.selected = dest;
+      state.selectedTo = null;
+      say(`Rückstand in ${v.label} (neues Glas).`, 2.8);
+    }
+  }
+
+  function dumpResidueToNewGlass() {
+    if (!state.particles.some((p) => p.vessel === "funnel")) return false;
+    const dest = addVessel();
+    if (!dest) return false;
+    dumpFunnel(dest);
+    return true;
+  }
 
   function onDown(e) {
     const pos = pointerPos(e);
     state.pointer.x = pos.x;
     state.pointer.y = pos.y;
     state.pointer.down = true;
+
+    for (const v of vesselList()) {
+      if (burnerHit(v, pos.x, pos.y)) {
+        v.heating = false;
+        say("Brenner aus.", 1.8);
+        syncToolButtons();
+        return;
+      }
+    }
+
+    const a = funnelAnchor();
+    if (a && state.particles.some((p) => p.vessel === "funnel") && Math.hypot(pos.x - a.x, pos.y - a.y - 20) < 44) {
+      dumpResidueToNewGlass();
+      return;
+    }
+
     const hit = vesselAt(pos.x, pos.y);
-    const funnelHit = (() => {
-      const fx = (vessels.A.x + vessels.A.w + vessels.B.x) / 2;
-      const fy = vessels.A.y + 20;
-      return Math.hypot(pos.x - fx, pos.y - fy) < 42;
-    })();
-
-    if (state.tool === "magnet" && hit && state.magnetGrab.length) {
-      state.magnetGrab.forEach((id) => {
-        const p = findP(id);
-        if (p) {
-          p.vessel = hit;
-          p.x = vessels[hit].x + vessels[hit].w / 2;
-          p.y = vessels[hit].y + 40;
-        }
-      });
-      state.magnetGrab = [];
-      say("Eisenpulver im Zielglas abgelegt.", 2.4);
-      return;
-    }
-
-    if (funnelHit && state.particles.some((p) => p.vessel === "funnel")) {
-      const dest = state.selected;
-      state.particles.forEach((p) => {
-        if (p.vessel === "funnel") {
-          p.vessel = dest;
-          p.x = vessels[dest].x + vessels[dest].w * 0.5;
-          p.y = vessels[dest].y + 36;
-        }
-      });
-      say(`Rückstand nach ${vessels[dest].label} gegeben.`, 2.4);
-      return;
-    }
-
-    if (!hit) return;
-
-    if (state.tool === "pointer") {
-      state.selected = hit;
-      return;
-    }
-    if (state.tool === "stir") {
-      state.selected = hit;
-      state.stir = { vessel: hit, t: 2.4 };
-      say("Rühren mischt und beschleunigt das Lösen.", 2.2);
-      return;
-    }
-    if (state.tool === "heat") {
-      vessels[hit].heating = !vessels[hit].heating;
-      state.selected = hit;
-      say(vessels[hit].heating ? "Brenner an — Teilchen werden schneller." : "Brenner aus.", 2.2);
-      return;
-    }
-    if (state.tool === "thermo") {
-      vessels[hit].thermo = !vessels[hit].thermo;
-      state.selected = hit;
-      return;
-    }
-    if (state.tool === "empty") {
-      state.particles = state.particles.filter((p) => p.vessel !== hit);
-      state.bonds = state.bonds.filter((b) => findP(b.a) && findP(b.b));
-      say(`${vessels[hit].label} geleert.`, 1.8);
-      return;
-    }
-    if (state.tool === "distill") {
-      state.selected = hit;
-      if (!state.distill) {
-        state.distill = true;
-        vessels.A.thermo = true;
-        say("Destillation aufgebaut. Jetzt Brenner unter Becherglas A.", 3);
-      }
-      return;
-    }
-    if (state.tool === "filter") {
-      if (!filterPick) {
-        filterPick = hit;
-        say("Jetzt das Auffangglas antippen.", 2);
-      } else {
-        if (filterPick === hit) {
-          filterPick = null;
-          return;
-        }
-        state.filter = { from: filterPick, to: hit, t: 0 };
-        filterPick = null;
-        say("Gemisch läuft durch den Filter …", 2);
-      }
-      return;
-    }
-    if (state.tool === "decant") {
-      if (!decantPick) {
-        decantPick = hit;
-        say("Jetzt das Auffangglas antippen.", 2);
-      } else {
-        state.decant = { from: decantPick, to: hit, t: 0 };
-        decantPick = null;
-      }
-    }
+    if (hit) selectVessel(hit);
   }
 
   function onMove(e) {
@@ -1232,26 +1607,174 @@
     state.pointer.down = false;
   }
 
+  function needSource() {
+    if (!state.selected || !vessels[state.selected]) {
+      say("Zuerst ein Becherglas antippen.", 2.2);
+      return null;
+    }
+    return state.selected;
+  }
+
+  function toggleHeat(id) {
+    if (state.t - (state.lastHeatToggle || 0) < 0.15) return;
+    state.lastHeatToggle = state.t;
+    const v = vessels[id];
+    if (!v) return;
+    v.heating = !v.heating;
+    if (v.heating && !v.thermo) v.thermo = true;
+    const others = vesselList().filter((x) => x.heating && x.id !== v.id);
+    let msg;
+    if (v.heating && state.distill && state.distill.from !== id) {
+      msg = `Brenner unter ${v.label}. Der Kühler hängt an ${vessels[state.distill.from].label} — hier dampft es in die Luft.`;
+    } else if (v.heating) {
+      msg = "Brenner an. Nochmals «Brenner aus» oder die Flamme antippen.";
+    } else if (others.length) {
+      msg = `Brenner unter ${v.label} aus. Achtung: unter ${others.map((x) => x.label).join(", ")} brennt es noch.`;
+    } else {
+      msg = "Brenner aus — die Temperatur sinkt.";
+    }
+    say(msg, 3.4);
+    syncToolButtons();
+  }
+
+  function startFilter(from, to) {
+    if (!to || from === to) return;
+    if (state.filter) return;
+    state.filter = { from, to, t: 0 };
+    state.funnelOn = to;
+    say(`Filter über ${vessels[to].label} — Filtrat läuft in das neue Glas. Filter antippen: Rückstand in ein weiteres Glas.`, 3.6);
+  }
+
+  function startDistill(from, to) {
+    if (!to || from === to) return;
+    if (state.distill && state.distill.from === from && state.distill.to === to) {
+      state.distill = null;
+      say("Destillations-Apparatur abgebaut.", 2.2);
+      return;
+    }
+    state.distill = { from, to };
+    vessels[from].thermo = true;
+    say(`Destillation: ${vessels[from].label} → ${vessels[to].label}. Jetzt Brenner unter ${vessels[from].label}.`, 4);
+  }
+
+  function startMagnet(from, to) {
+    if (!to || from === to) return;
+    state.magnetGrab = [];
+    state.magnetJob = { from, to, t: 0, phase: "attract", x: 0, y: 0 };
+    say("Magnet holt Eisen aus dem Glas …", 2.2);
+  }
+
+  function startDecant(from, to) {
+    if (!to || from === to) return;
+    state.decant = { from, to, t: 0 };
+  }
+
+  function startExtract(from, to) {
+    if (!to || from === to) return;
+    if (!vesselHasType(from, "gasoline")) {
+      say("Zuerst Benzin zur Milch geben. Benzin mischt sich nicht mit Wasser — darin löst sich das Fett.", 3.8);
+      return false;
+    }
+    state.stir = { vessel: from, t: 2.5 };
+    state.extractWait = { from, to, t: 2.6 };
+    say("Rühren … das Fett wechselt ins Benzin. Danach kommt die gelbe Schicht ins neue Glas.", 3.5);
+    return true;
+  }
+
+  function updateExtractWait(dt) {
+    if (!state.extractWait) return;
+    state.extractWait.t -= dt;
+    if (state.extractWait.t > 0) return;
+    const { from, to } = state.extractWait;
+    state.extractWait = null;
+    if (!vessels[from] || !vessels[to]) return;
+    state.decant = { from, to, t: 0, mode: "extract" };
+  }
+
+  function emptyVessel(id) {
+    state.particles = state.particles.filter((p) => p.vessel !== id);
+    state.bonds = state.bonds.filter((b) => findP(b.a) && findP(b.b));
+    say(`${vessels[id].label} geleert.`, 1.8);
+  }
+
+  function runTool(id) {
+    state.tool = id;
+    syncToolButtons();
+    if (id === "pointer") return;
+    const from = needSource();
+    if (!from) return;
+    if (id === "stir") {
+      state.stir = { vessel: from, t: 2.4 };
+      if (vesselHasType(from, "fat") && vesselHasType(from, "gasoline")) {
+        say("Rühren: das Fett wechselt vom Wasser ins Benzin (Extrahieren).", 2.8);
+      } else {
+        say("Rühren mischt und beschleunigt das Lösen.", 2.2);
+      }
+      return;
+    }
+    if (id === "heat") {
+      toggleHeat(from);
+      return;
+    }
+    if (id === "thermo") {
+      vessels[from].thermo = !vessels[from].thermo;
+      return;
+    }
+    if (id === "empty") {
+      emptyVessel(from);
+      return;
+    }
+    if (id === "filter") {
+      const to = addVessel();
+      if (!to) return;
+      state.selectedTo = to;
+      startFilter(from, to);
+      return;
+    }
+    if (id === "extract") {
+      if (!vesselHasType(from, "gasoline")) {
+        say("Zuerst Benzin zur Milch geben. Benzin mischt sich nicht mit Wasser — darin löst sich das Fett.", 3.8);
+        return;
+      }
+      const to = addVessel();
+      if (!to) return;
+      state.selectedTo = to;
+      startExtract(from, to);
+      return;
+    }
+    const to = ensureTarget(from);
+    if (!to) return;
+    state.selectedTo = to;
+    if (id === "distill") startDistill(from, to);
+    else if (id === "magnet") startMagnet(from, to);
+    else if (id === "decant") startDecant(from, to);
+  }
+
   function resetAll() {
     state.particles = [];
     state.bonds = [];
     state.magnetGrab = [];
+    state.magnetJob = null;
     state.stir = null;
     state.filter = null;
+    state.funnelOn = null;
     state.decant = null;
-    state.distill = false;
-    filterPick = null;
-    decantPick = null;
-    Object.values(vessels).forEach((v) => {
-      v.temp = ROOM;
-      v.heating = false;
-      v.thermo = false;
-      v.tilt = 0;
+    state.distill = null;
+    state.extractWait = null;
+    vesselIds().forEach((id) => {
+      if (id !== "A") delete vessels[id];
     });
+    if (!vessels.A) vessels.A = makeVessel("A", "Becherglas A");
+    vessels.A.temp = ROOM;
+    vessels.A.heating = false;
+    vessels.A.thermo = false;
+    vessels.A.tilt = 0;
     state.selected = "A";
+    state.selectedTo = null;
     state.tool = "pointer";
+    layout();
     syncToolButtons();
-    say("Labor geleert. Stoff wählen und ins Glas geben.", 3);
+    say("Labor geleert. Becherglas wählen, Stoff einfüllen, dann Werkzeug.", 3);
   }
 
   function startScenario(key) {
@@ -1262,44 +1785,154 @@
       addSubstance("sand", "A");
       addSubstance("salt", "A");
       addSubstance("water", "A");
-      say("Steinsalz-Gemisch. Rühren, filtrieren, dann Filtrat erhitzen (eindampfen).", 5);
+      say("Steinsalz. Glas A wählen, dann Filtrieren — ein Auffangglas entsteht von selbst.", 5);
     } else if (key === "float") {
       addSubstance("sand", "A");
       addSubstance("styrofoam", "A");
       addSubstance("water", "A");
-      say("Styropor schwimmt, Sand sinkt. Dekantieren trennt die Flüssigkeit.", 4.5);
+      say("Styropor schwimmt, Sand sinkt. Glas wählen, dann Dekantieren.", 4.5);
     } else if (key === "magnet") {
       addSubstance("iron", "A");
       addSubstance("alu", "A");
       addSubstance("sand", "A");
-      setTool("magnet");
-      say("Zieh den Magnet über das Glas: nur Eisen folgt.", 4);
+      say("Glas A wählen, dann Magnet — Eisen wandert in ein neues Glas.", 4);
     } else if (key === "distill") {
       addSubstance("water", "A");
       addSubstance("alcohol", "A");
-      state.distill = true;
-      vessels.A.thermo = true;
-      setTool("heat");
-      say("Brenner an: zuerst bleibt die Temperatur bei 78 °C (Alkohol), später 100 °C (Wasser).", 5.5);
+      const to = ensureTarget("A");
+      state.selectedTo = to;
+      startDistill("A", to);
+      say("Apparatur steht. Brenner tippen: zuerst 78 °C (Alkohol), später 100 °C (Wasser).", 5.5);
     } else if (key === "adsorb") {
       addSubstance("water", "A");
       addSubstance("ink", "A");
       addSubstance("charcoal", "A");
-      say("Aktivkohle bindet Tinte. Danach filtrieren — das Filtrat wird heller.", 5);
+      say("Aktivkohle bindet Tinte. Danach Filtrieren — das Filtrat wird heller.", 5);
+    } else if (key === "extract") {
+      addSubstance("milk", "A");
+      addSubstance("gasoline", "A");
+      say("Milch + Benzin. Glas wählen, rühren oder Extrahieren — das Fett geht in die gelbe Benzinschicht.", 5.5);
     }
   }
 
-  function setTool(id) {
-    state.tool = id;
-    filterPick = null;
-    decantPick = null;
-    syncToolButtons();
+  function syncToolButtons() {
+    const heating = !!(vessels[state.selected] && vessels[state.selected].heating);
+    document.querySelectorAll(".tool").forEach((btn) => {
+      const id = btn.dataset.tool;
+      btn.classList.toggle("active", id === state.tool);
+      btn.classList.toggle("lit", id === "heat" && heating);
+      if (id === "heat") {
+        const name = btn.querySelector(".tool-name");
+        if (name) name.textContent = heating ? "Brenner aus" : "Brenner";
+      }
+    });
   }
 
-  function syncToolButtons() {
-    document.querySelectorAll(".tool").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.tool === state.tool);
+  function fmtTemp(t) {
+    if (t == null || Number.isNaN(t)) return "—";
+    if (t >= 2500) return "sehr hoch";
+    return `${t} °C`;
+  }
+
+  function densityLabel(spec) {
+    if (spec.mixture) return "ca. 1 (wie Wasser)";
+    if (spec.density == null) return "—";
+    const n = String(spec.density).replace(".", ",");
+    if (spec.density === 1) return `${n} (wie Wasser)`;
+    if (spec.density < 1) return `${n} — leichter als Wasser`;
+    return `${n} — schwerer als Wasser`;
+  }
+
+  function meltLabel(spec) {
+    if (spec.mixture) return "— (Gemisch)";
+    if (spec.melt == null) return "—";
+    if (spec.boil != null && spec.melt === spec.boil) return "schmilzt nicht";
+    return fmtTemp(spec.melt);
+  }
+
+  function boilLabel(spec) {
+    if (spec.mixture) return "Wasseranteil ca. 100 °C";
+    if (spec.decompose) return `zersetzt sich (ca. ${spec.decompose} °C), verdampft nicht`;
+    if (spec.boil == null) return "verdampft nicht";
+    if (spec.melt != null && spec.melt === spec.boil) return "kein klarer Siedepunkt / zersetzt sich";
+    return fmtTemp(spec.boil);
+  }
+
+  function solubility(spec, solvent) {
+    if (spec.mixture) {
+      if (solvent === "water") return "Emulsion: Fett ist als Tröpfchen drin, nicht echt gelöst";
+      if (solvent === "alcohol") return "nein (das Fett nicht)";
+      return "das Fett ja, das Wasser nein";
+    }
+    if (spec.id === solvent) return "ist das Lösungsmittel";
+    if ((spec.solubleIn || []).includes(solvent)) {
+      if (spec.id === "sugar" && solvent === "alcohol") return "ja, wenn genug Alkohol da ist";
+      return "ja";
+    }
+    if ((spec.mixesWith || []).includes(solvent)) return "vermischt sich vollständig";
+    if ((spec.emulsifyIn || []).includes(solvent)) return "nein — nur als Tröpfchen (Emulsion)";
+    if (spec.phase === "liquid" && solvent === "water") return "nein — eigene Schicht";
+    return "nein";
+  }
+
+  function specialNotes(spec) {
+    const bits = [];
+    if (spec.mixture) bits.push("Gemisch (Emulsion), kein Reinstoff.");
+    if (spec.adsorbs) bits.push("Bindet Farbstoffe an der Oberfläche (Adsorbieren).");
+    if ((spec.adsorbedBy || []).includes("charcoal")) bits.push("Haftet an Aktivkohle.");
+    if (spec.magnetic) bits.push("Wird vom Magneten angezogen.");
+    if (spec.passesFilter === false) bits.push("Bleibt im Filter (Rückstand).");
+    if (spec.density != null && spec.density < 0.5) bits.push("Schwimmt immer oben auf Wasser.");
+    else if (spec.phase === "solid" && spec.density != null && spec.density < 1) bits.push("Schwimmt auf Wasser.");
+    else if (spec.phase === "solid" && spec.density != null && spec.density > 1.05) bits.push("Sinkt in Wasser.");
+    if (spec.decompose) bits.push("Beim starken Erhitzen schwarze Kruste — nicht rückgängig.");
+    if ((spec.solubleIn || []).includes("gasoline")) bits.push("Lässt sich mit Benzin extrahieren.");
+    if (spec.hint) bits.push(spec.hint);
+    return bits.join(" ");
+  }
+
+  function substanceRows(spec) {
+    return [
+      ["Schmelzpunkt", meltLabel(spec)],
+      ["Siedepunkt", boilLabel(spec)],
+      ["Dichte", densityLabel(spec)],
+      ["Löslichkeit in Wasser", solubility(spec, "water")],
+      ["Löslichkeit in Alkohol", solubility(spec, "alcohol")],
+      ["Löslichkeit in Benzin", solubility(spec, "gasoline")],
+      ["Magnetisch", spec.magnetic ? "ja" : spec.mixture ? "nein" : "nein"],
+      ["Besonderes", specialNotes(spec)],
+    ];
+  }
+
+  function closeFactsheet() {
+    const el = document.getElementById("factsheet");
+    if (!el) return;
+    el.classList.add("hidden");
+    el.hidden = true;
+  }
+
+  function openFactsheet(id) {
+    const spec = SUBSTANCES[id];
+    const el = document.getElementById("factsheet");
+    if (!spec || !el) return;
+    document.getElementById("factTitle").textContent = spec.name;
+    document.getElementById("factShort").textContent = spec.short || "";
+    const sw = document.getElementById("factSwatch");
+    sw.style.background = spec.color || "#ccc";
+    sw.style.borderColor = spec.stroke || "#999";
+    const list = document.getElementById("factList");
+    list.innerHTML = "";
+    substanceRows(spec).forEach(([k, v]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = v;
+      list.appendChild(dt);
+      list.appendChild(dd);
     });
+    el.classList.remove("hidden");
+    el.hidden = false;
+    document.getElementById("factClose").focus();
   }
 
   function buildUI() {
@@ -1310,31 +1943,40 @@
       b.className = "tool" + (t.id === "pointer" ? " active" : "");
       b.dataset.tool = t.id;
       b.type = "button";
-      b.innerHTML = `<span class="ico">${t.icon}</span>${t.name}`;
-      b.addEventListener("click", () => {
-        if (t.id === "distill") {
-          state.distill = !state.distill;
-          vessels.A.thermo = state.distill || vessels.A.thermo;
-          say(state.distill ? "Destillation aufgebaut. Becherglas A erhitzen." : "Apparatur abgebaut.", 3);
-        }
-        setTool(t.id);
-      });
+      b.innerHTML = `<span class="ico">${t.icon}</span><span class="tool-name">${t.name}</span>`;
+      b.addEventListener("click", () => runTool(t.id));
       tools.appendChild(b);
     });
 
     const shelf = document.getElementById("shelf");
     shelf.innerHTML = `<div class="col-title">Stoffe</div>`;
     Object.values(SUBSTANCES).forEach((s) => {
+      const wrap = document.createElement("div");
+      wrap.className = "jar-wrap";
       const b = document.createElement("button");
       b.className = "jar" + (s.extra ? " extra" : "");
       b.type = "button";
-      b.title = s.hint;
-      b.innerHTML = `<span class="swatch" style="background:${s.color};border-color:${s.stroke}"></span><span><span class="nm">${s.name}</span><span class="sub">${s.short}</span></span>`;
+      b.title = s.hint || s.name;
+      b.innerHTML = `<span class="swatch" style="background:${s.color};border-color:${s.stroke}"></span><span><span class="nm">${s.name}</span><span class="sub">${s.short || ""}</span></span>`;
       b.addEventListener("click", () => {
-        addSubstance(s.id, state.selected);
+        const id = state.selected || "A";
+        if (!vessels[id]) return;
+        addSubstance(s.id, id);
         observeEl.textContent = s.hint;
       });
-      shelf.appendChild(b);
+      const info = document.createElement("button");
+      info.className = "jar-info";
+      info.type = "button";
+      info.title = `Eigenschaften von ${s.name}`;
+      info.setAttribute("aria-label", `Eigenschaften von ${s.name}`);
+      info.textContent = "i";
+      info.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openFactsheet(s.id);
+      });
+      wrap.appendChild(b);
+      wrap.appendChild(info);
+      shelf.appendChild(wrap);
     });
 
     const bar = document.getElementById("examples");
@@ -1344,6 +1986,7 @@
       ["float", "Schwimmen"],
       ["magnet", "Magnet"],
       ["distill", "Destillieren"],
+      ["extract", "Extrahieren"],
       ["adsorb", "Adsorbieren"],
     ];
     chips.forEach(([k, n]) => {
@@ -1363,6 +2006,15 @@
       const start = e.target.closest("[data-start]");
       if (start) startScenario(start.dataset.start);
       else if (e.target.id === "intro") document.getElementById("intro").classList.add("hidden");
+    });
+
+    const sheet = document.getElementById("factsheet");
+    document.getElementById("factClose").addEventListener("click", closeFactsheet);
+    sheet.addEventListener("click", (e) => {
+      if (e.target.id === "factsheet") closeFactsheet();
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeFactsheet();
     });
   }
 

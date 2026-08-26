@@ -132,6 +132,11 @@ button {
   background: #e7f4fb;
   color: #0a5a86;
 }
+.tool.lit {
+  border-color: var(--accent);
+  background: #fff1e6;
+  color: var(--accent-dark);
+}
 .tool:hover { border-color: #c5dce8; }
 
 .stage-wrap {
@@ -172,6 +177,116 @@ button {
   line-height: 1.35;
 }
 
+.jar-wrap {
+  display: grid;
+  grid-template-columns: 1fr 26px;
+  gap: 3px;
+  align-items: stretch;
+}
+.jar-info {
+  border-radius: 10px;
+  background: #e8f3f9;
+  color: var(--natech);
+  font-weight: 800;
+  font-size: .92rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  line-height: 1;
+  min-width: 26px;
+  padding: 0;
+}
+.jar-info:hover {
+  background: var(--natech);
+  color: #fff;
+}
+
+.factsheet {
+  position: fixed;
+  inset: 0;
+  background: rgba(18, 28, 32, .55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+  padding: 1rem;
+}
+.factsheet.hidden,
+.factsheet[hidden] { display: none; }
+.fact-card {
+  width: min(420px, 100%);
+  max-height: min(92vh, 640px);
+  overflow: auto;
+  background: var(--panel);
+  border-radius: 20px;
+  padding: 1.15rem 1.25rem 1rem;
+  box-shadow: 0 24px 60px rgba(0,0,0,.28);
+  position: relative;
+}
+.fact-close {
+  position: absolute;
+  top: .55rem;
+  right: .65rem;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  background: #f0e8d8;
+  font-size: 1.35rem;
+  line-height: 1;
+  color: var(--ink);
+}
+.fact-close:hover { background: #e36b1e; color: #fff; }
+.fact-head {
+  display: flex;
+  gap: .7rem;
+  align-items: center;
+  margin: 0 1.6rem .85rem 0;
+}
+.fact-swatch {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid rgba(0,0,0,.18);
+  flex: 0 0 auto;
+  box-shadow: inset 0 -4px 6px rgba(0,0,0,.12);
+}
+.fact-card h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+.fact-short {
+  margin: .1rem 0 0;
+  color: var(--muted);
+  font-weight: 650;
+  font-size: .85rem;
+}
+.fact-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 8.2rem 1fr;
+  gap: .35rem .7rem;
+  font-size: .88rem;
+  line-height: 1.35;
+}
+.fact-list dt {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 750;
+  font-size: .72rem;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  padding-top: .12rem;
+}
+.fact-list dd {
+  margin: 0;
+  font-weight: 650;
+}
+.fact-note {
+  margin: .85rem 0 0;
+  font-size: .72rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
 .jar {
   display: grid;
   grid-template-columns: 28px 1fr;
@@ -182,6 +297,7 @@ button {
   border-radius: 12px;
   padding: .32rem .4rem;
   text-align: left;
+  min-width: 0;
 }
 .jar:hover { border-color: #c5dce8; }
 .jar.extra { opacity: .95; }

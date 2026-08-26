@@ -31,13 +31,29 @@
     <div class="bottom" id="examples"></div>
   </div>
 
+  <div class="factsheet hidden" id="factsheet" hidden>
+    <div class="fact-card" role="dialog" aria-modal="true" aria-labelledby="factTitle">
+      <button class="fact-close" type="button" id="factClose" aria-label="Schliessen">×</button>
+      <div class="fact-head">
+        <span class="fact-swatch" id="factSwatch"></span>
+        <div>
+          <h2 id="factTitle">Stoff</h2>
+          <p class="fact-short" id="factShort"></p>
+        </div>
+      </div>
+      <dl class="fact-list" id="factList"></dl>
+      <p class="fact-note">Werte im Applet, vereinfacht fürs Teilchenmodell — nicht massstabsgetreu.</p>
+    </div>
+  </div>
+
   <div class="intro" id="intro">
     <div class="card">
       <h2>Virtuelles Teilchen-Labor</h2>
       <p class="lead">
-        Stoffe sind Kügelchen. Du mischst sie im Becherglas — sie verhalten sich wie in echt:
-        Zucker löst sich, Sand sinkt, Styropor schwimmt, Eisen klebt am Magnet.
-        Mit den Werkzeugen links kannst du trennen.
+        Zuerst ein Becherglas antippen, dann links ein Werkzeug.
+        Ein zweites Glas entsteht von selbst — der Filter sitzt über dem Auffangglas.
+        Zwei Gläser hintereinander antippen: erstes wird in das zweite gefüllt.
+        Brenner nochmals tippen oder die Flamme antippen = aus.
       </p>
       <div class="examples">
         <button class="ex" type="button" data-start="free"><b>Frei experimentieren</b><span>Leere Gläser, alle Stoffe</span></button>
@@ -46,6 +62,7 @@
         <button class="ex" type="button" data-start="magnet"><b>Magnettrennung</b><span>Eisen + Aluminium + Sand</span></button>
         <button class="ex" type="button" data-start="distill"><b>Destillieren</b><span>Alkohol + Wasser, Temperatur bleibt stehen</span></button>
         <button class="ex" type="button" data-start="adsorb"><b>Adsorbieren</b><span>Tinte + Aktivkohle, dann filtrieren</span></button>
+        <button class="ex" type="button" data-start="extract"><b>Extrahieren</b><span>Milchfett in Benzin lösen, dann Schicht abtrennen</span></button>
       </div>
     </div>
   </div>
