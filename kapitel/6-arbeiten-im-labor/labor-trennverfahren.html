@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Labor · Trennverfahren</title>
+  <link rel="stylesheet" href="labor/labor.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="badge">NaTech 7</div>
+      <h1>Labor · <span>Trennverfahren</span></h1>
+      <div class="grow"></div>
+      <button class="btn ghost" type="button" id="btnHelp">So gehts</button>
+      <button class="btn warn" type="button" id="btnReset">Neu starten</button>
+    </header>
+
+    <div class="workspace">
+      <aside class="tools" id="tools"></aside>
+      <div class="stage-wrap">
+        <canvas id="lab" aria-label="Labor-Arbeitsfläche"></canvas>
+        <div class="observe">
+          <div class="k">Beobachtung</div>
+          <p id="observe">Wähle ein Becherglas, dann einen Stoff rechts — oder starte unten ein Beispiel.</p>
+        </div>
+      </div>
+      <aside class="shelf" id="shelf"></aside>
+    </div>
+
+    <div class="bottom" id="examples"></div>
+  </div>
+
+  <div class="intro" id="intro">
+    <div class="card">
+      <h2>Virtuelles Teilchen-Labor</h2>
+      <p class="lead">
+        Stoffe sind Kügelchen. Du mischst sie im Becherglas — sie verhalten sich wie in echt:
+        Zucker löst sich, Sand sinkt, Styropor schwimmt, Eisen klebt am Magnet.
+        Mit den Werkzeugen links kannst du trennen.
+      </p>
+      <div class="examples">
+        <button class="ex" type="button" data-start="free"><b>Frei experimentieren</b><span>Leere Gläser, alle Stoffe</span></button>
+        <button class="ex" type="button" data-start="salt"><b>Steinsalz</b><span>Sand + Salz + Wasser → filtrieren → eindampfen</span></button>
+        <button class="ex" type="button" data-start="float"><b>Schwimmen / Sinken</b><span>Styropor + Sand + Wasser → dekantieren</span></button>
+        <button class="ex" type="button" data-start="magnet"><b>Magnettrennung</b><span>Eisen + Aluminium + Sand</span></button>
+        <button class="ex" type="button" data-start="distill"><b>Destillieren</b><span>Alkohol + Wasser, Temperatur bleibt stehen</span></button>
+        <button class="ex" type="button" data-start="adsorb"><b>Adsorbieren</b><span>Tinte + Aktivkohle, dann filtrieren</span></button>
+      </div>
+    </div>
+  </div>
+
+  <script src="labor/substances.js"></script>
+  <script src="labor/labor.js"></script>
+</body>
+</html>
