@@ -876,9 +876,44 @@
 
   function brownianStrength(p, temp) {
     const tK = Math.min(3.2, 0.45 + temp / 70);
-    if (p.phase === "solid") return 0.2 * tK;
+    if (p.phase === "solid") return 0.25 * tK;
     if (p.phase === "gas") return 10 * tK;
-    return 5.5 * tK;
+    return 4.2 * tK;
+  }
+
+  function collideDens(p) {
+    if (p.phase === "liquid" || p.phase === "dissolved") return mixDensity(p, p.vessel);
+    return specOf(p).density;
+  }
+
+  function computePool() {
+    vesselIds().forEach((id) => {
+      const v = vessels[id];
+      const c = state.cache[id];
+      if (!v || !c) return;
+      const b = inner(v);
+      const liquids = c.liquids;
+      if (!liquids.length) {
+        c.surfaceY = b.bottom;
+        return;
+      }
+      let top = b.bottom;
+      for (let i = 0; i < liquids.length; i++) {
+        const p = liquids[i];
+        if (p.y - p.r < top) top = p.y - p.r;
+      }
+      c.surfaceY = top;
+    });
+  }
+
+  function clampInVessel(p) {
+    const v = vessels[p.vessel];
+    if (!v) return;
+    const b = inner(v);
+    if (p.x < b.left + p.r) p.x = b.left + p.r;
+    if (p.x > b.right - p.r) p.x = b.right - p.r;
+    if (p.y > b.bottom - p.r) p.y = b.bottom - p.r;
+    if (p.y < b.top + p.r && p.phase !== "gas") p.y = b.top + p.r;
   }
 
   function applyPhysics(dt) {
@@ -914,88 +949,37 @@
       }
       const liquidish = p.phase === "liquid" || p.phase === "dissolved";
       const dens = specOf(p).density;
+      const c = state.cache[v.id];
 
       if (p.phase === "gas") {
         p.vy -= 110 * dt;
+      } else if (liquidish) {
+        p.vy += g * dt * 0.45;
       } else {
         p.vy += g * dt;
       }
 
-      const drag = p.phase === "gas" ? 1.2 : liquidish ? 2.2 : 0.7;
+      if (p.phase === "solid" && dens < 1 && c && c.liquids && c.liquids.length) {
+        const surface = c.surfaceY != null ? c.surfaceY : b.bottom;
+        if (p.y + p.r > surface) p.vy -= g * dt * (1.08 - dens) * 2.8;
+      }
+
+      const drag = p.phase === "gas" ? 1.2 : liquidish ? 2.8 : 0.75;
       p.vx *= Math.max(0, 1 - drag * dt);
       p.vy *= Math.max(0, 1 - drag * dt);
 
       const brown = brownianStrength(p, v.temp);
-      p.vx += (Math.random() - 0.5) * brown * (liquidish ? 0.7 : 1);
-      if (!liquidish) p.vy += (Math.random() - 0.5) * brown * 0.25;
-      else if (v.temp > 80) p.vy -= Math.random() * (v.temp - 80) * 0.12;
+      p.vx += (Math.random() - 0.5) * brown;
+      p.vy += (Math.random() - 0.5) * brown * (liquidish ? 0.7 : 0.22);
 
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.rot += p.spin * dt;
-
-      if (p.x < b.left + p.r) {
-        p.x = b.left + p.r;
-        p.vx *= -0.15;
-      }
-      if (p.x > b.right - p.r) {
-        p.x = b.right - p.r;
-        p.vx *= -0.15;
-      }
-      if (p.y > b.bottom - p.r) {
-        p.y = b.bottom - p.r;
-        if (p.vy > 0) p.vy = 0;
-        p.vx *= 0.85;
-      }
-      if (p.y < b.top + p.r && p.phase !== "gas") {
-        p.y = b.top + p.r;
-        p.vy *= 0.1;
-      }
-
-      if (p.phase === "solid" && dens < 1) {
-        const surface = state.cache[v.id] && state.cache[v.id].surfaceY;
-        if (surface && p.y > surface - p.r) {
-          p.y = surface - p.r;
-          if (p.vy > 0) p.vy *= -0.2;
-        }
-      }
+      clampInVessel(p);
+      if (p.y >= b.bottom - p.r && p.vy > 0) p.vy = 0;
 
       updateDissolve(p, dt, v);
       updateMelt(p, v);
-    });
-  }
-
-  function settleLiquids(dt) {
-    const stirring = state.stir && state.stir.vessel;
-    vesselIds().forEach((id) => {
-      const v = vessels[id];
-      const c = state.cache[id];
-      if (!v || !c || !c.liquids.length) {
-        if (c && v) c.surfaceY = inner(v).bottom;
-        return;
-      }
-      if (stirring === id) return;
-      const b = inner(v);
-      const cols = Math.max(6, Math.floor((b.right - b.left) / 7));
-      const colW = (b.right - b.left) / cols;
-      const heights = new Float32Array(cols);
-      const hot = v.temp > 90;
-      const k = Math.min(1, dt * (hot ? 4 : 10));
-      c.liquids.sort((a, b) => mixDensity(b, id) - mixDensity(a, id));
-      c.liquids.forEach((p) => {
-        if (p.phase !== "liquid" && p.phase !== "dissolved") return;
-        let col = Math.floor((p.x - b.left) / colW);
-        if (col < 0) col = 0;
-        if (col >= cols) col = cols - 1;
-        const target = b.bottom - p.r - heights[col];
-        p.y += (target - p.y) * k;
-        if (p.y > b.bottom - p.r) p.y = b.bottom - p.r;
-        if (p.y < b.top + p.r) p.y = b.top + p.r;
-        heights[col] += p.r * 1.45;
-      });
-      let maxH = 0;
-      for (let i = 0; i < cols; i++) if (heights[i] > maxH) maxH = heights[i];
-      c.surfaceY = b.bottom - maxH;
     });
   }
 
@@ -1028,26 +1012,31 @@
   }
 
   function collide() {
-    const cell = 18;
-    const grid = new Map();
+    const cell = 22;
     const key = (x, y) => x + ":" + y;
-    const solids = [];
+    const list = [];
     state.particles.forEach((p) => {
-      if (p.phase !== "solid" || p.adsorbedTo || p.stuck) return;
+      if (p.phase === "gas" || p.phase === "char" || p.adsorbedTo || p.stuck) return;
       if (p.vessel === "vapor" || p.vessel === "transit" || p.vessel === "funnel" || p.vessel === "magnet") return;
-      solids.push(p);
-      const cx = Math.floor(p.x / cell);
-      const cy = Math.floor(p.y / cell);
-      const k = key(cx, cy);
+      p._dx = 0;
+      p._dy = 0;
+      list.push(p);
+    });
+    const grid = new Map();
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      const k = key(Math.floor(p.x / cell), Math.floor(p.y / cell));
       let bucket = grid.get(k);
       if (!bucket) {
         bucket = [];
         grid.set(k, bucket);
       }
       bucket.push(p);
-    });
-    for (let i = 0; i < solids.length; i++) {
-      const a = solids[i];
+    }
+    const kick = 1.8;
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      const aLiq = a.phase === "liquid" || a.phase === "dissolved";
       const cx = Math.floor(a.x / cell);
       const cy = Math.floor(a.y / cell);
       for (let ox = -1; ox <= 1; ox++) {
@@ -1057,22 +1046,52 @@
           for (let j = 0; j < bucket.length; j++) {
             const b = bucket[j];
             if (b.id <= a.id || a.vessel !== b.vessel) continue;
+            const bLiq = b.phase === "liquid" || b.phase === "dissolved";
+            const pad = aLiq && bLiq ? 1.35 : 1.05;
+            const min = (a.r + b.r) * pad;
             const dx = b.x - a.x;
             const dy = b.y - a.y;
-            const min = a.r + b.r;
-            const d2 = dx * dx + dy * dy;
-            if (d2 >= min * min || d2 === 0) continue;
-            const dist = Math.sqrt(d2);
-            const overlap = (min - dist) * 0.5;
-            const nx = dx / dist;
-            const ny = dy / dist;
-            a.x -= nx * overlap;
-            a.y -= ny * overlap;
-            b.x += nx * overlap;
-            b.y += ny * overlap;
+            if (dx * dx + dy * dy >= min * min) continue;
+            const da = collideDens(a);
+            const db = collideDens(b);
+            const side = Math.random() < 0.5 ? kick : -kick;
+            a._dx -= side;
+            b._dx += side;
+            const dd = db - da;
+            if (dd > 0.08) {
+              a._dy -= kick * (da < 0.2 ? 3.2 : 1.8);
+              b._dy += kick * 0.7;
+            } else if (dd < -0.08) {
+              b._dy -= kick * (db < 0.2 ? 3.2 : 1.8);
+              a._dy += kick * 0.7;
+            } else {
+              a._dx -= side * 0.9;
+              b._dx += side * 0.9;
+              if (aLiq && bLiq) {
+                const lift = kick * 0.5;
+                if (a.y <= b.y) a._dy -= lift;
+                else b._dy -= lift;
+              }
+            }
           }
         }
       }
+    }
+    const maxPush = 7.5;
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      let dx = p._dx;
+      let dy = p._dy;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len > maxPush) {
+        dx = (dx / len) * maxPush;
+        dy = (dy / len) * maxPush;
+      }
+      p.x += dx;
+      p.y += dy;
+      p._dx = 0;
+      p._dy = 0;
+      clampInVessel(p);
     }
   }
 
@@ -1498,6 +1517,7 @@
     last = now;
     state.t += dt;
     rebuildCache();
+    computePool();
     updateHeat(dt);
     updateDecompose(dt);
     updateStir(dt);
@@ -1506,7 +1526,6 @@
     updateDecant(dt);
     updateVapor(dt);
     applyPhysics(dt);
-    settleLiquids(dt);
     solveBonds(dt);
     collide();
     updateCharStick();
@@ -1789,7 +1808,7 @@
     } else if (key === "float") {
       addSubstance("sand", "A");
       addSubstance("styrofoam", "A");
-      addSubstance("water", "A");
+      addSubstance("water", "A", 2.4);
       say("Styropor schwimmt, Sand sinkt. Glas wählen, dann Dekantieren.", 4.5);
     } else if (key === "magnet") {
       addSubstance("iron", "A");

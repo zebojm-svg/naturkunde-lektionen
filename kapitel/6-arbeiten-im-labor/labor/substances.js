@@ -8,7 +8,7 @@ window.SUBSTANCES = {
     color: "#3d9be9",
     stroke: "#1d6fad",
     r: 4.2,
-    count: 36,
+    count: 64,
     density: 1,
     shape: "round",
     phase: "liquid",
