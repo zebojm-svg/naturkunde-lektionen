@@ -288,6 +288,13 @@
       return;
     }
     const b = inner(v);
+    if (spec.phase === "liquid" || spec.phase === "dissolved") {
+      const c = state.cache[vesselId];
+      if (c && c.liquids && c.liquids.length > 20 && c.surfaceY && c.surfaceY < b.top + 22) {
+        if (!quiet) say("Dieses Glas ist voll — zuerst etwas abgiessen oder in ein neues Glas filtrieren.", 2.6);
+        return;
+      }
+    }
     const n = Math.round(spec.count * (amountScale || 1));
     const clusterN = spec.cluster || 1;
     let made = 0;
@@ -1165,7 +1172,7 @@
       if (p.phase === "gas") {
         p.vy -= 110 * dt;
       } else if (liquidish) {
-        p.vy += g * dt * 0.45;
+        p.vy += g * dt * 0.28;
       } else {
         p.vy += g * dt;
       }
@@ -1273,33 +1280,54 @@
             const min = (a.r + b.r) * pad;
             const dx = b.x - a.x;
             const dy = b.y - a.y;
-            if (dx * dx + dy * dy >= min * min) continue;
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= min * min) continue;
             const big = a.r >= 6.5 || b.r >= 6.5;
-            const k = big ? 0.55 : 0.45;
             const da = collideDens(a);
             const db = collideDens(b);
             const dd = db - da;
             if (dd > 0.08) {
-              a._dy -= k * (da < 0.2 ? 2.4 : 1.2);
-              b._dy += k * 0.45;
+              const k = big ? 0.7 : 0.9;
+              a._dy -= k * (da < 0.2 ? 2.4 : 1.3);
+              b._dy += k * 0.5;
             } else if (dd < -0.08) {
-              b._dy -= k * (db < 0.2 ? 2.4 : 1.2);
-              a._dy += k * 0.45;
-            } else if (!big) {
-              const side = Math.random() < 0.5 ? k : -k;
-              a._dx -= side;
-              b._dx += side;
+              const k = big ? 0.7 : 0.9;
+              b._dy -= k * (db < 0.2 ? 2.4 : 1.3);
+              a._dy += k * 0.5;
+            } else {
+              let dist = Math.sqrt(d2);
+              let nx;
+              let ny;
+              if (dist < 0.001) {
+                nx = (a.id & 1) ? 1 : -1;
+                ny = 0;
+                dist = 0.001;
+              } else {
+                nx = dx / dist;
+                ny = dy / dist;
+              }
+              if (Math.abs(nx) < 0.4) nx += nx >= 0 ? 0.9 : -0.9;
+              nx *= 1.4;
+              ny *= aLiq && bLiq ? 0.55 : 0.8;
+              const slen = Math.sqrt(nx * nx + ny * ny) || 1;
+              nx /= slen;
+              ny /= slen;
+              const push = Math.min(3.8, (min - dist) * 0.5);
+              a._dx -= nx * push;
+              a._dy -= ny * push;
+              b._dx += nx * push;
+              b._dy += ny * push;
             }
           }
         }
       }
     }
-    const maxPush = 2.2;
     for (let i = 0; i < list.length; i++) {
       const p = list[i];
       let dx = p._dx;
       let dy = p._dy;
       const len = Math.sqrt(dx * dx + dy * dy);
+      const maxPush = p.r >= 6.5 ? 2 : 5.2;
       if (len > maxPush) {
         dx = (dx / len) * maxPush;
         dy = (dy / len) * maxPush;
