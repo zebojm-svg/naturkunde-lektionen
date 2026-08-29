@@ -77,21 +77,78 @@
     const ids = vesselIds();
     const n = Math.max(1, ids.length);
     const w = Math.min(150, (W - 28) / (n + 0.35));
-    const h = Math.min(228, H * 0.58);
+    const h = Math.min(176, H * 0.4);
     const gap = Math.max(18, Math.min(36, (W - n * w) / (n + 1)));
     const total = n * w + (n - 1) * gap;
     let x0 = Math.max(12, (W - total) / 2);
-    const y = H * 0.24;
+    const y = Math.min(H * 0.4, H * 0.55 - h - 36);
     ids.forEach((id) => {
       const v = vessels[id];
       const old = { x: v.x, y: v.y, w: v.w, h: v.h };
-      v.x = x0;
-      v.y = y;
+      v.restX = x0;
+      v.restY = y;
       v.w = w;
       v.h = h;
-      if (old.w) relocateParticles(id, old, v);
+      if (!isPourSource(id)) {
+        v.x = x0;
+        v.y = y;
+        if (old.w) relocateParticles(id, old, v);
+      }
       x0 += w + gap;
     });
+  }
+
+  function pourJob() {
+    return state.decant || state.filter || null;
+  }
+
+  function isPourSource(id) {
+    const job = pourJob();
+    return !!(job && job.from === id);
+  }
+
+  function moveVessel(v, nx, ny) {
+    const dx = nx - v.x;
+    const dy = ny - v.y;
+    if (!dx && !dy) return;
+    v.x = nx;
+    v.y = ny;
+    particlesIn(v.id).forEach((p) => {
+      p.x += dx;
+      p.y += dy;
+    });
+  }
+
+  function applyBeakerTilt(v) {
+    const tilt = v.tilt || 0;
+    if (!tilt) return;
+    const dir = v.pourDir == null ? 1 : v.pourDir;
+    const ox = dir > 0 ? v.x + v.w : v.x;
+    const oy = v.y + v.h;
+    ctx.translate(ox, oy);
+    ctx.rotate(dir * tilt * 0.62);
+    ctx.translate(-ox, -oy);
+  }
+
+  function transformBeakerPoint(v, px, py) {
+    const tilt = v.tilt || 0;
+    if (!tilt) return { x: px, y: py };
+    const dir = v.pourDir == null ? 1 : v.pourDir;
+    const ox = dir > 0 ? v.x + v.w : v.x;
+    const oy = v.y + v.h;
+    const ang = dir * tilt * 0.62;
+    const dx = px - ox;
+    const dy = py - oy;
+    const c = Math.cos(ang);
+    const s = Math.sin(ang);
+    return { x: ox + dx * c - dy * s, y: oy + dx * s + dy * c };
+  }
+
+  function beakerLip(v) {
+    const dir = v.pourDir == null ? 1 : v.pourDir;
+    const local =
+      dir > 0 ? { x: v.x + v.w - 8, y: v.y + 18 } : { x: v.x + 8, y: v.y + 18 };
+    return transformBeakerPoint(v, local.x, local.y);
   }
 
   function relocateParticles(id, oldV, newV) {
@@ -192,11 +249,11 @@
       vessel,
       x,
       y,
-      vx: (Math.random() - 0.5) * 20,
-      vy: Math.random() * 8,
+      vx: (Math.random() - 0.5) * 4,
+      vy: Math.random() * 2,
       r: spec.r * (0.88 + Math.random() * 0.24),
       rot: Math.random() * Math.PI,
-      spin: (Math.random() - 0.5) * 1.2,
+      spin: spec.r >= 6.5 ? 0 : (Math.random() - 0.5) * 0.35,
       phase: spec.phase,
       seed: Math.random() * 1000,
       dissolve: 0,
@@ -706,71 +763,263 @@
 
   function updateStir(dt) {
     if (!state.stir) return;
+    if (isPourSource(state.stir.vessel)) return;
     state.stir.t -= dt;
     if (state.stir.t <= 0) {
       state.stir = null;
       return;
     }
     const v = vessels[state.stir.vessel];
+    if (!v) return;
     const b = inner(v);
     const cx = (b.left + b.right) / 2;
-    const cy = (liquidTop(v.id) + b.bottom) / 2;
+    const cy = (liquidTop(v.id) + b.bottom) * 0.5;
+    const ang = state.t * 2.1;
+    state.stir.ang = ang;
+    const rad = Math.max(10, (b.right - b.left) * 0.28);
+    const rx = cx + Math.cos(ang) * rad;
+    const ry = cy + Math.sin(ang) * rad * 0.32;
     particlesIn(v.id).forEach((p) => {
+      const liquidish = p.phase === "liquid" || p.phase === "dissolved";
+      const k = liquidish ? 1 : p.r > 7.2 ? 0.1 : 0.38;
       const dx = p.x - cx;
       const dy = p.y - cy;
-      p.vx += -dy * 6 * dt * 18;
-      p.vy += dx * 6 * dt * 18;
+      p.vx += (-dy * 3.6 - (p.x - rx) * 0.9) * dt * k;
+      p.vy += (dx * 2.8 - (p.y - ry) * 0.45) * dt * k;
     });
   }
 
-  function updateFilter(dt) {
-    if (!state.filter) return;
-    const f = state.filter;
-    f.t += dt;
-    const from = f.from;
-    const to = f.to;
-    const anchor = funnelAnchor();
-    const funnelX = anchor ? anchor.x : 0;
-    const funnelY = anchor ? anchor.y + 14 : 0;
-    if (!f.started) {
-      f.started = true;
-      state.funnelOn = to;
-      particlesIn(from).forEach((p) => {
-        p.vessel = "transit";
-        p.pass = canPassFilter(p);
+  function beginPour(job) {
+    const from = vessels[job.from];
+    const to = vessels[job.to];
+    if (!from || !to) return;
+    const homeX = from.x;
+    const homeY = from.y;
+    from.restX = homeX;
+    from.restY = homeY;
+    const dir = homeX + from.w / 2 <= to.x + to.w / 2 ? 1 : -1;
+    from.pourDir = dir;
+    const lipOver = dir > 0 ? 0.82 : 0.18;
+    job.homeX = homeX;
+    job.homeY = homeY;
+    job.overX = Math.max(4, Math.min(state.W - from.w - 4, to.x + to.w * 0.5 - from.w * lipOver));
+    job.overY = Math.max(8, to.y - from.h * 0.62);
+    job.dir = dir;
+    job.spill = 0;
+    job.t = 0;
+  }
+
+  function captureTopLayer(fromId, extract) {
+    const ids = Object.create(null);
+    const list = particlesIn(fromId);
+    if (extract) {
+      list.forEach((p) => {
+        if (canExtract(p)) ids[p.id] = true;
       });
+      return ids;
     }
-    const moving = state.particles.filter((p) => p.vessel === "transit");
-    moving.forEach((p) => {
-      p.x += (funnelX - p.x) * dt * 3.2;
-      p.y += (funnelY - p.y) * dt * 2.4;
-      if (Math.hypot(p.x - funnelX, p.y - funnelY) < 22) {
-        if (p.pass) {
-          p.vessel = to;
-          p.x = vessels[to].x + vessels[to].w * 0.5 + (Math.random() - 0.5) * 30;
-          p.y = vessels[to].y + 40;
-          p.vy = 40;
-        } else {
-          p.vessel = "funnel";
-          p.x = funnelX + (Math.random() - 0.5) * 18;
-          p.y = funnelY + 10 + Math.random() * 24;
-        }
+    const liquids = list.filter((p) => p.phase === "liquid" || p.phase === "dissolved");
+    if (!liquids.length) {
+      list.forEach((p) => {
+        if (p.phase === "solid" && specOf(p).density < 0.5) ids[p.id] = true;
+      });
+      return ids;
+    }
+    let minD = Infinity;
+    liquids.forEach((p) => {
+      const d = mixDensity(p, fromId);
+      if (d < minD) minD = d;
+    });
+    list.forEach((p) => {
+      if (p.phase === "char" || p.stuck) return;
+      if (p.phase === "gas") {
+        ids[p.id] = true;
+        return;
+      }
+      if (p.phase === "liquid" || p.phase === "dissolved") {
+        if (mixDensity(p, fromId) <= minD + 0.07) ids[p.id] = true;
+      } else if (p.phase === "solid" && specOf(p).density < minD - 0.02) {
+        ids[p.id] = true;
       }
     });
-    if (f.t > 2.8 || moving.length === 0) {
-      state.particles.forEach((p) => {
-        if (p.vessel === "transit") p.vessel = p.pass ? to : "funnel";
-      });
+    return ids;
+  }
+
+  function smoothstep(u) {
+    const t = Math.max(0, Math.min(1, u));
+    return t * t * (3 - 2 * t);
+  }
+
+  function flyTransit(dt, job) {
+    const to = vessels[job.to];
+    if (!to) return;
+    const funnel = job.funnel ? funnelAnchor() : null;
+    const sinkX = funnel ? funnel.x : to.x + to.w * 0.5;
+    const sinkY = funnel ? funnel.y + 18 : to.y + 26;
+    state.particles.forEach((p) => {
+      if (p.vessel !== "transit") return;
+      p.x += (sinkX - p.x) * dt * 4.4;
+      p.y += (sinkY - p.y) * dt * 3.2 + 55 * dt;
+      if (Math.hypot(p.x - sinkX, p.y - sinkY) > 24) return;
+      if (job.funnel) {
+        if (p.pass) {
+          p.vessel = job.to;
+          p.x = to.x + to.w * 0.5 + (Math.random() - 0.5) * 28;
+          p.y = to.y + 30;
+          p.vy = 48;
+        } else {
+          p.vessel = "funnel";
+          p.x = sinkX + (Math.random() - 0.5) * 16;
+          p.y = sinkY + 8 + Math.random() * 20;
+          p.vx = 0;
+          p.vy = 0;
+        }
+      } else {
+        p.vessel = job.to;
+        p.x = to.x + to.w * 0.5 + (Math.random() - 0.5) * 26;
+        p.y = to.y + 26;
+        p.vy = 42;
+      }
+    });
+  }
+
+  function spillFrom(job, dt) {
+    const from = vessels[job.from];
+    if (!from || from.tilt < 0.38) return;
+    const lip = beakerLip(from);
+    job.spill = (job.spill || 0) + dt * 22;
+    const cand = particlesIn(job.from)
+      .filter((p) => (job.funnel ? p.phase !== "char" && !p.stuck : canDecant(p, job.from)))
+      .sort((a, b) => a.y - b.y);
+    while (job.spill >= 1 && cand.length) {
+      job.spill -= 1;
+      const p = cand.shift();
+      if (job.funnel) p.pass = canPassFilter(p);
+      p.vessel = "transit";
+      p.x = lip.x + (Math.random() - 0.5) * 10;
+      p.y = lip.y + (Math.random() - 0.5) * 4;
+      p.vx = 0;
+      p.vy = 20;
+    }
+  }
+
+  function finishPour(job) {
+    const from = vessels[job.from];
+    const to = vessels[job.to];
+    state.particles.forEach((p) => {
+      if (p.vessel !== "transit") return;
+      if (job.funnel) p.vessel = p.pass ? job.to : "funnel";
+      else p.vessel = job.to;
+    });
+    if (from) {
+      const restX = from.restX != null ? from.restX : from.x;
+      const restY = from.restY != null ? from.restY : from.y;
+      if (job.funnel) {
+        const funnel = funnelAnchor();
+        particlesIn(job.from).forEach((p) => {
+          if (p.phase === "char" || p.stuck) return;
+          p.pass = canPassFilter(p);
+          if (p.pass && to) {
+            p.vessel = job.to;
+            p.x = to.x + to.w * 0.5 + (Math.random() - 0.5) * 28;
+            p.y = to.y + 28;
+            p.vy = 40;
+          } else {
+            p.vessel = "funnel";
+            p.x = (funnel ? funnel.x : p.x) + (Math.random() - 0.5) * 16;
+            p.y = (funnel ? funnel.y + 16 : p.y) + Math.random() * 18;
+          }
+        });
+      } else if (to && job.layerIds) {
+        particlesIn(job.from).forEach((p) => {
+          if (!job.layerIds[p.id]) return;
+          p.vessel = job.to;
+          p.x = to.x + to.w * 0.5 + (Math.random() - 0.5) * 22;
+          p.y = to.y + 24;
+          p.vy = 20;
+        });
+      }
+      moveVessel(from, restX, restY);
+      from.tilt = 0;
+      from.pourDir = 1;
+    }
+    if (job.funnel) {
       state.filter = null;
       const n = state.particles.filter((p) => p.vessel === "funnel").length;
       if (!n) state.funnelOn = null;
       say(
         n
-          ? `Filtrat in ${vessels[to].label}. Rückstand im Filter — Filter antippen: neues Glas für den Rückstand.`
-          : `Alles ist durch den Filter in ${vessels[to].label} gelaufen.`,
+          ? `Filtrat in ${to.label}. Rückstand im Filter — Filter antippen: neues Glas für den Rückstand.`
+          : `Alles ist durch den Filter in ${to.label} gelaufen.`,
         3.5
       );
+    } else {
+      const extracted = job.mode === "extract";
+      state.decant = null;
+      const leftLiq = particlesIn(job.from).some((p) => p.phase === "liquid" || p.phase === "dissolved");
+      say(
+        extracted
+          ? `Extrakt in ${to.label} — gelbe Schicht (Fett in Benzin). Die wässrige Milch bleibt zurück. Benzin erhitzen: Fettfleck.`
+          : leftLiq
+            ? `Obere Schicht in ${to.label}. Im ${from.label} bleibt eine weitere Schicht — nochmals Dekantieren.`
+            : `Flüssigkeit in ${to.label}. Der Bodenkörper bleibt in ${from.label}.`,
+        3.6
+      );
     }
+  }
+
+  function updatePour(job, dt) {
+    if (!job) return;
+    if (job.overX == null) beginPour(job);
+    job.t += dt;
+    const from = vessels[job.from];
+    const to = vessels[job.to];
+    if (!from || !to) {
+      if (job.funnel) state.filter = null;
+      else state.decant = null;
+      return;
+    }
+    from.pourDir = job.dir == null ? 1 : job.dir;
+    const LIFT = 0.55;
+    const MOVE = 0.9;
+    const BACK = 0.85;
+    const t = job.t;
+    const layerLeft = () =>
+      particlesIn(job.from).some((p) => (job.funnel ? p.phase !== "char" && !p.stuck : job.layerIds && job.layerIds[p.id]));
+    if (t < LIFT) {
+      const u = t / LIFT;
+      moveVessel(from, job.homeX, job.homeY - 50 * u);
+      from.tilt = 0.12 * u;
+    } else if (t < LIFT + MOVE) {
+      const u = smoothstep((t - LIFT) / MOVE);
+      moveVessel(
+        from,
+        job.homeX + (job.overX - job.homeX) * u,
+        job.homeY - 50 + (job.overY - (job.homeY - 50)) * u
+      );
+      from.tilt = 0.12 + 0.35 * u;
+    } else if (layerLeft() && t < LIFT + MOVE + 7) {
+      moveVessel(from, job.overX, job.overY);
+      from.tilt = Math.min(0.98, 0.5 + (t - LIFT - MOVE) * 0.55);
+      spillFrom(job, dt);
+      flyTransit(dt, job);
+    } else {
+      flyTransit(dt, job);
+      const pourEnd = Math.max(job.tPourEnd || t, LIFT + MOVE);
+      if (!job.tPourEnd) job.tPourEnd = t;
+      const u = smoothstep((t - job.tPourEnd) / BACK);
+      moveVessel(from, job.overX + (job.homeX - job.overX) * u, job.overY + (job.homeY - job.overY) * u);
+      from.tilt = 0.9 * (1 - u);
+      const leftover = state.particles.some((p) => p.vessel === "transit");
+      if (u >= 1 && (!leftover || t > job.tPourEnd + BACK + 1)) finishPour(job);
+    }
+  }
+
+  function updateFilter(dt) {
+    if (!state.filter) return;
+    state.filter.funnel = true;
+    state.funnelOn = state.filter.to;
+    updatePour(state.filter, dt);
   }
 
   function canPassFilter(p) {
@@ -781,54 +1030,14 @@
 
   function updateDecant(dt) {
     if (!state.decant) return;
-    const d = state.decant;
-    d.t += dt;
-    const from = vessels[d.from];
-    const to = vessels[d.to];
-    from.tilt = Math.min(0.9, d.t * 1.4);
-    const targetX = to.x + 20;
-    const targetY = to.y + 36;
-    particlesIn(from.id).forEach((p) => {
-      if (!canDecant(p, from.id)) return;
-      p.vessel = "transit";
-      p.x += (targetX - p.x) * dt * 2.5;
-      p.y += (targetY - p.y) * dt * 1.6;
-    });
-    state.particles.forEach((p) => {
-      if (p.vessel !== "transit") return;
-      p.x += (targetX - p.x) * dt * 2.5;
-      p.y += (targetY - p.y) * dt * 1.6;
-      if (Math.hypot(p.x - targetX, p.y - targetY) < 36) {
-        p.vessel = to.id;
-        p.vy = 30;
-      }
-    });
-    if (d.t > 2.6) {
-      state.particles.forEach((p) => {
-        if (p.vessel === "transit") p.vessel = to.id;
-      });
-      from.tilt = 0;
-      const extracted = d.mode === "extract";
-      state.decant = null;
-      say(
-        extracted
-          ? `Extrakt in ${to.label} — gelbe Schicht (Fett in Benzin). Die wässrige Milch bleibt zurück. Benzin erhitzen: Fettfleck.`
-          : "Flüssigkeit (und was schwimmt) wurde abgegossen — Dekantieren.",
-        3.4
-      );
-    }
+    updatePour(state.decant, dt);
   }
 
   function canDecant(p, fromId) {
     if (state.decant && state.decant.mode === "extract") return canExtract(p);
     if (p.phase === "char" || p.stuck) return false;
-    if (p.phase === "liquid" || p.phase === "dissolved" || p.phase === "gas") return true;
-    const spec = specOf(p);
-    if (spec.density < 0.5) return true;
-    if (p.phase === "liquid" && spec.density < 1) return true;
-    const top = liquidTop(fromId);
-    if (spec.density < 1 && p.y < top + 14) return true;
-    return false;
+    if (state.decant && state.decant.layerIds) return !!state.decant.layerIds[p.id];
+    return !!captureTopLayer(fromId, false)[p.id];
   }
 
   function canExtract(p) {
@@ -875,10 +1084,12 @@
   }
 
   function brownianStrength(p, temp) {
-    const tK = Math.min(3.2, 0.45 + temp / 70);
-    if (p.phase === "solid") return 0.25 * tK;
-    if (p.phase === "gas") return 10 * tK;
-    return 4.2 * tK;
+    if (p.r >= 6.5) return 0;
+    const heat = Math.max(0, (temp - 25) / 110);
+    if (heat < 0.04 && p.phase !== "gas") return 0;
+    if (p.phase === "gas") return 0.7 + heat * 1.2;
+    if (p.phase === "solid") return 0.012 * heat;
+    return 0.11 * heat;
   }
 
   function collideDens(p) {
@@ -917,7 +1128,7 @@
   }
 
   function applyPhysics(dt) {
-    const g = 1400;
+    const g = 820;
     state.particles.forEach((p) => {
       if (p.vessel === "magnet" || p.vessel === "vapor" || p.vessel === "transit") return;
       if (p.adsorbedTo) return;
@@ -964,17 +1175,28 @@
         if (p.y + p.r > surface) p.vy -= g * dt * (1.08 - dens) * 2.8;
       }
 
-      const drag = p.phase === "gas" ? 1.2 : liquidish ? 2.8 : 0.75;
+      const drag = p.phase === "gas" ? 1.6 : liquidish ? 5.2 : 2.4;
       p.vx *= Math.max(0, 1 - drag * dt);
       p.vy *= Math.max(0, 1 - drag * dt);
 
       const brown = brownianStrength(p, v.temp);
-      p.vx += (Math.random() - 0.5) * brown;
-      p.vy += (Math.random() - 0.5) * brown * (liquidish ? 0.7 : 0.22);
+      if (brown) {
+        p.x += (Math.random() - 0.5) * brown;
+        p.y += (Math.random() - 0.5) * brown * 0.35;
+      }
+
+      if (isPourSource(v.id) && v.tilt > 0.45) {
+        const dir = v.pourDir == null ? 1 : v.pourDir;
+        const pourable = state.filter ? p.phase !== "char" && !p.stuck : canDecant(p, v.id);
+        if (pourable) {
+          p.vx += dir * 90 * dt;
+          p.vy -= 18 * dt;
+        }
+      }
 
       p.x += p.vx * dt;
       p.y += p.vy * dt;
-      p.rot += p.spin * dt;
+      p.rot += p.r >= 6.5 ? 0 : p.spin * dt * 0.3;
       clampInVessel(p);
       if (p.y >= b.bottom - p.r && p.vy > 0) p.vy = 0;
 
@@ -1033,9 +1255,9 @@
       }
       bucket.push(p);
     }
-    const kick = 1.8;
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
+      if (isPourSource(a.vessel)) continue;
       const aLiq = a.phase === "liquid" || a.phase === "dissolved";
       const cx = Math.floor(a.x / cell);
       const cy = Math.floor(a.y / cell);
@@ -1052,32 +1274,27 @@
             const dx = b.x - a.x;
             const dy = b.y - a.y;
             if (dx * dx + dy * dy >= min * min) continue;
+            const big = a.r >= 6.5 || b.r >= 6.5;
+            const k = big ? 0.55 : 0.45;
             const da = collideDens(a);
             const db = collideDens(b);
-            const side = Math.random() < 0.5 ? kick : -kick;
-            a._dx -= side;
-            b._dx += side;
             const dd = db - da;
             if (dd > 0.08) {
-              a._dy -= kick * (da < 0.2 ? 3.2 : 1.8);
-              b._dy += kick * 0.7;
+              a._dy -= k * (da < 0.2 ? 2.4 : 1.2);
+              b._dy += k * 0.45;
             } else if (dd < -0.08) {
-              b._dy -= kick * (db < 0.2 ? 3.2 : 1.8);
-              a._dy += kick * 0.7;
-            } else {
-              a._dx -= side * 0.9;
-              b._dx += side * 0.9;
-              if (aLiq && bLiq) {
-                const lift = kick * 0.5;
-                if (a.y <= b.y) a._dy -= lift;
-                else b._dy -= lift;
-              }
+              b._dy -= k * (db < 0.2 ? 2.4 : 1.2);
+              a._dy += k * 0.45;
+            } else if (!big) {
+              const side = Math.random() < 0.5 ? k : -k;
+              a._dx -= side;
+              b._dx += side;
             }
           }
         }
       }
     }
-    const maxPush = 7.5;
+    const maxPush = 2.2;
     for (let i = 0; i < list.length; i++) {
       const p = list[i];
       let dx = p._dx;
@@ -1258,11 +1475,7 @@
   function drawBeaker(v) {
     const { x, y, w, h } = v;
     ctx.save();
-    if (v.tilt) {
-      ctx.translate(x + w, y + h);
-      ctx.rotate(-v.tilt * 0.45);
-      ctx.translate(-(x + w), -(y + h));
-    }
+    applyBeakerTilt(v);
     ctx.fillStyle = "rgba(0,0,0,.12)";
     ctx.beginPath();
     ctx.ellipse(x + w / 2, y + h - 2, w * 0.42, 8, 0, 0, Math.PI * 2);
@@ -1316,8 +1529,10 @@
 
   function drawBurner(v) {
     if (!v.heating) return;
-    const x = v.x + v.w / 2;
-    const y = v.y + v.h + 8;
+    const bx = isPourSource(v.id) && v.restX != null ? v.restX : v.x;
+    const by = isPourSource(v.id) && v.restY != null ? v.restY : v.y;
+    const x = bx + v.w / 2;
+    const y = by + v.h + 8;
     ctx.fillStyle = "#3a3f48";
     ctx.fillRect(x - 16, y + 18, 32, 10);
     ctx.fillRect(x - 6, y + 4, 12, 16);
@@ -1448,24 +1663,38 @@
     if (!v) return;
     const b = inner(v);
     const cx = (b.left + b.right) / 2;
-    const cy = (b.top + b.bottom) / 2;
+    const cy = (liquidTop(v.id) + b.bottom) * 0.5;
+    const ang = state.stir.ang || state.t * 2.1;
+    const rad = Math.max(10, (b.right - b.left) * 0.28);
+    const tipX = cx + Math.cos(ang) * rad;
+    const tipY = cy + Math.sin(ang) * rad * 0.32;
+    const handX = v.x + v.w * 0.82;
+    const handY = v.y - 6;
     ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(state.t * 8);
-    ctx.strokeStyle = "rgba(180,220,230,.9)";
-    ctx.lineWidth = 4;
+    applyBeakerTilt(v);
+    ctx.strokeStyle = "rgba(205,228,235,.96)";
+    ctx.lineWidth = 5;
+    ctx.lineCap = "round";
     ctx.beginPath();
-    ctx.moveTo(0, -70);
-    ctx.lineTo(0, 36);
+    ctx.moveTo(handX, handY);
+    ctx.lineTo(tipX, tipY);
     ctx.stroke();
+    ctx.fillStyle = "rgba(235,242,246,.95)";
+    ctx.beginPath();
+    ctx.arc(tipX, tipY, 4.2, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
   }
 
   function render() {
     drawBench();
     drawDistill();
-    vesselList().forEach(drawBeaker);
+    const pourId = pourJob() && pourJob().from;
+    vesselList().forEach((v) => {
+      if (v.id !== pourId) drawBeaker(v);
+    });
     drawFunnel();
+    if (pourId && vessels[pourId]) drawBeaker(vessels[pourId]);
     drawStir();
     const ids = vesselIds();
     const byVessel = {};
@@ -1482,6 +1711,7 @@
       const list = byVessel[id];
       list.sort((a, b) => a.y - b.y);
       ctx.save();
+      applyBeakerTilt(v);
       beakerPath(v);
       ctx.clip();
       drawCharLayer(v);
@@ -1658,10 +1888,15 @@
 
   function startFilter(from, to) {
     if (!to || from === to) return;
-    if (state.filter) return;
-    state.filter = { from, to, t: 0 };
+    if (state.filter || state.decant) return;
+    const layerIds = Object.create(null);
+    particlesIn(from).forEach((p) => {
+      if (p.phase !== "char" && !p.stuck) layerIds[p.id] = true;
+    });
+    state.filter = { from, to, funnel: true, layerIds };
     state.funnelOn = to;
-    say(`Filter über ${vessels[to].label} — Filtrat läuft in das neue Glas. Filter antippen: Rückstand in ein weiteres Glas.`, 3.6);
+    beginPour(state.filter);
+    say(`Glas ${vessels[from].label} wird über den Filter auf ${vessels[to].label} gekippt.`, 3.4);
   }
 
   function startDistill(from, to) {
@@ -1685,7 +1920,15 @@
 
   function startDecant(from, to) {
     if (!to || from === to) return;
-    state.decant = { from, to, t: 0 };
+    if (state.decant || state.filter) return;
+    const layerIds = captureTopLayer(from, false);
+    if (!particlesIn(from).some((p) => layerIds[p.id])) {
+      say("Nichts zum Abgiessen — nur der Bodenkörper ist da.", 2.8);
+      return;
+    }
+    state.decant = { from, to, layerIds };
+    beginPour(state.decant);
+    say(`Glas ${vessels[from].label} steht über ${vessels[to].label} — nur die obere Schicht fliesst. Nochmals Dekantieren: nächste Schicht.`, 3.8);
   }
 
   function startExtract(from, to) {
@@ -1694,8 +1937,8 @@
       say("Zuerst Benzin zur Milch geben. Benzin mischt sich nicht mit Wasser — darin löst sich das Fett.", 3.8);
       return false;
     }
-    state.stir = { vessel: from, t: 2.5 };
-    state.extractWait = { from, to, t: 2.6 };
+    state.stir = { vessel: from, t: 3.2 };
+    state.extractWait = { from, to, t: 3.5 };
     say("Rühren … das Fett wechselt ins Benzin. Danach kommt die gelbe Schicht ins neue Glas.", 3.5);
     return true;
   }
@@ -1707,7 +1950,8 @@
     const { from, to } = state.extractWait;
     state.extractWait = null;
     if (!vessels[from] || !vessels[to]) return;
-    state.decant = { from, to, t: 0, mode: "extract" };
+    state.decant = { from, to, mode: "extract", layerIds: captureTopLayer(from, true) };
+    beginPour(state.decant);
   }
 
   function emptyVessel(id) {
@@ -1723,7 +1967,7 @@
     const from = needSource();
     if (!from) return;
     if (id === "stir") {
-      state.stir = { vessel: from, t: 2.4 };
+      state.stir = { vessel: from, t: 3.4 };
       if (vesselHasType(from, "fat") && vesselHasType(from, "gasoline")) {
         say("Rühren: das Fett wechselt vom Wasser ins Benzin (Extrahieren).", 2.8);
       } else {
@@ -1788,6 +2032,7 @@
     vessels.A.heating = false;
     vessels.A.thermo = false;
     vessels.A.tilt = 0;
+    vessels.A.pourDir = 1;
     state.selected = "A";
     state.selectedTo = null;
     state.tool = "pointer";
