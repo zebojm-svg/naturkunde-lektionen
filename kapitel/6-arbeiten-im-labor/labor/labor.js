@@ -8,6 +8,7 @@
   const MAX = 6000;
   const MAX_PER_GLASS = 900;
   const ROOM = 22;
+  const TEMP_MIN = -18;
   const TEMP_MAX = 4000;
   const LETTERS = "ABCDEF";
 
@@ -48,6 +49,7 @@
       h: 214,
       temp: ROOM,
       heating: false,
+      cooling: false,
       thermo: false,
       tilt: 0,
     };
@@ -62,10 +64,9 @@
   }
 
   function inner(v) {
-    const tilt = v.tilt || 0;
     return {
-      left: v.x + 14 + tilt * 18,
-      right: v.x + v.w - 14 + tilt * 8,
+      left: v.x + 14,
+      right: v.x + v.w - 14,
       top: v.y + 28,
       bottom: v.y + v.h - 10,
     };
@@ -81,7 +82,8 @@
     const gap = Math.max(18, Math.min(36, (W - n * w) / (n + 1)));
     const total = n * w + (n - 1) * gap;
     let x0 = Math.max(12, (W - total) / 2);
-    const y = Math.min(H * 0.4, H * 0.55 - h - 36);
+    const topPad = state.distill ? 62 : 36;
+    const y = Math.max(topPad, Math.min(H * 0.4, H * 0.55 - h - topPad));
     ids.forEach((id) => {
       const v = vessels[id];
       const old = { x: v.x, y: v.y, w: v.w, h: v.h };
@@ -127,6 +129,17 @@
     const oy = v.y + v.h;
     ctx.translate(ox, oy);
     ctx.rotate(dir * tilt * 0.62);
+    ctx.translate(-ox, -oy);
+  }
+
+  function applyBeakerTiltInv(v) {
+    const tilt = v.tilt || 0;
+    if (!tilt) return;
+    const dir = v.pourDir == null ? 1 : v.pourDir;
+    const ox = dir > 0 ? v.x + v.w : v.x;
+    const oy = v.y + v.h;
+    ctx.translate(ox, oy);
+    ctx.rotate(-dir * tilt * 0.62);
     ctx.translate(-ox, -oy);
   }
 
@@ -413,11 +426,45 @@
     }
   }
 
+  function snapIce(p, v) {
+    const b = inner(v);
+    const cellX = Math.max(6.6, p.r * 1.7);
+    const cellY = Math.max(5.6, p.r * 1.45);
+    const col = Math.round((p.x - b.left) / cellX);
+    const row = Math.round((b.bottom - p.y) / cellY);
+    p.x = b.left + col * cellX + (row % 2 ? cellX * 0.5 : 0);
+    p.y = b.bottom - row * cellY - p.r * 0.2;
+    p.vx = 0;
+    p.vy = 0;
+    p.frozen = true;
+    p.phase = "solid";
+    clampInVessel(p);
+  }
+
   function updateMelt(p, v) {
     const spec = specOf(p);
     if (p.phase === "dissolved" || p.phase === "gas" || p.phase === "char") return;
     const canMelt = spec.melt != null && (spec.boil == null || spec.melt < spec.boil);
-    if (v.temp >= spec.melt && p.phase === "solid" && canMelt) {
+    if (p.frozen && v.temp > spec.melt + 1) {
+      p.frozen = false;
+      p.phase = "liquid";
+      p.r = spec.r;
+      if (spec.id === "water" && (!v._thawAt || state.t - v._thawAt > 4)) {
+        v._thawAt = state.t;
+        say("Eis schmilzt — die Teilchen lösen sich aus dem Gitter.", 2.8);
+      }
+      return;
+    }
+    if (spec.id === "water" && p.phase === "liquid" && v.temp <= spec.melt - 1) {
+      snapIce(p, v);
+      p.r = spec.r;
+      if (!v._frozeAt || state.t - v._frozeAt > 4) {
+        v._frozeAt = state.t;
+        say("Wasser gefriert — die Teilchen bleiben in einem Gitter stecken.", 3);
+      }
+      return;
+    }
+    if (v.temp >= spec.melt && p.phase === "solid" && canMelt && !p.frozen) {
       p.phase = "liquid";
       p.r = spec.liquidR || Math.max(2.8, spec.r * 0.48);
       if (spec.decompose) p.caramel = true;
@@ -529,29 +576,30 @@
       p.phase = "gas";
       p.vy = -40 - Math.random() * 30;
       p.r = specOf(p).r * 1.35;
+      p.gasAge = 0;
       if (state.distill && state.distill.from === id) {
-        p.vessel = "vapor";
-        p.pathT = 0;
+        p.y = inner(v).top + 16 + Math.random() * 18;
+        p.vy = -8;
       }
     }
     if (kind.type === "alcohol") {
       say(
         state.distill && state.distill.from === id
-          ? "Alkohol siedet — Dampf geht in den Kühler, Temperatur bleibt bei 78 °C."
+          ? "Alkohol siedet — Dampf steigt oben im Glas, geht durchs Rohr und wird wieder flüssig."
           : "Alkohol siedet und dampft in die Luft (78 °C).",
         2.8
       );
     } else if (kind.type === "water") {
       say(
         state.distill && state.distill.from === id
-          ? "Wasser siedet — Dampf geht in den Kühler, Temperatur bleibt bei 100 °C."
+          ? "Wasser siedet — Dampf oben im Glas, dann durchs Rohr. Die Temperatur bleibt bei 100 °C."
           : "Wasser siedet und dampft in die Luft (100 °C).",
         2.8
       );
     } else if (kind.type === "gasoline") {
       say(
         state.distill && state.distill.from === id
-          ? "Benzin siedet — Dampf geht in den Kühler, Fett bleibt zurück."
+          ? "Benzin siedet — Dampf durchs Rohr, Fett bleibt zurück."
           : "Benzin verdampft — das Fett bleibt als Fleck zurück.",
         3.2
       );
@@ -578,6 +626,7 @@
   function updateHeat(dt) {
     vesselList().forEach((v) => {
       if (v.heating) {
+        v.cooling = false;
         const boil = boilingKind(v.id);
         if (boil && v.temp >= boil.bp - 0.5) {
           v.temp = boil.bp;
@@ -587,9 +636,14 @@
           if (v.temp > 120) rate = 8 + (v.temp - 120) * 0.03;
           v.temp = Math.min(TEMP_MAX, v.temp + dt * rate);
         }
+      } else if (v.cooling) {
+        v.temp = Math.max(TEMP_MIN, v.temp - dt * 16);
       } else if (v.temp > ROOM) {
         v.temp += (ROOM - v.temp) * dt * 0.18;
         if (v.temp < ROOM + 0.3) v.temp = ROOM;
+      } else if (v.temp < ROOM) {
+        v.temp += (ROOM - v.temp) * dt * 0.07;
+        if (v.temp > ROOM - 0.3) v.temp = ROOM;
       }
       crystallizeIfDry(v.id);
     });
@@ -607,14 +661,16 @@
     const pair = distillPair();
     if (!pair) return { x: 0, y: 0, condensing: true };
     const { a, b } = pair;
-    const x0 = a.x + a.w * 0.55;
-    const y0 = a.y + 8;
-    const x1 = a.x + a.w * 0.55;
-    const y1 = a.y - 52;
-    const x2 = b.x + b.w * 0.45;
-    const y2 = b.y - 52;
-    const x3 = b.x + b.w * 0.45;
-    const y3 = b.y + 24;
+    const ax = a.x + a.w * 0.5;
+    const bx = b.x + b.w * 0.5;
+    const x0 = ax;
+    const y0 = a.y + 14;
+    const x1 = ax;
+    const y1 = a.y - 36;
+    const x2 = bx;
+    const y2 = b.y - 36;
+    const x3 = bx;
+    const y3 = b.y + 20;
     const pts = [
       [x0, y0],
       [x1, y1],
@@ -627,34 +683,73 @@
     return {
       x: pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f,
       y: pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f,
-      condensing: i >= 2,
+      condensing: i >= 1 && i < 3,
     };
   }
 
   function updateVapor(dt) {
+    const vapors = [];
     state.particles.forEach((p) => {
       if (p.phase !== "gas") return;
       if (p.vessel === "vapor") {
-        p.pathT = (p.pathT || 0) + dt * 0.55;
+        vapors.push(p);
+        p.pathT = (p.pathT || 0) + dt * 0.32;
         const pos = distillPath(Math.min(1, p.pathT));
-        p.x = pos.x + (Math.random() - 0.5) * 6;
-        p.y = pos.y + (Math.random() - 0.5) * 6;
-        if (pos.condensing || p.pathT >= 1) {
+        let ox = 0;
+        let oy = 0;
+        if (pos.condensing) {
+          p.clump = (p.clump || 0) + dt;
+          vapors.forEach((q) => {
+            if (q.id >= p.id || q.vessel !== "vapor") return;
+            const dx = q.x - p.x;
+            const dy = q.y - p.y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 > 1 && d2 < 400) {
+              ox += dx * 0.04;
+              oy += dy * 0.04;
+            }
+          });
+        }
+        p.x = pos.x + ox + (Math.random() - 0.5) * 2;
+        p.y = pos.y + oy + (Math.random() - 0.5) * 2;
+        if (p.pathT >= 1 || (p.clump || 0) > 1.1) {
           p.phase = "liquid";
           p.vessel = state.distill ? state.distill.to : "A";
           p.r = specOf(p).r;
           p.vx = 0;
-          p.vy = 20;
-          say(`Dampf wird im Kühler wieder flüssig — Destillat in ${vessels[p.vessel]?.label || "Becherglas B"}.`, 3);
+          p.vy = 16;
+          p.clump = 0;
+          say(`Im Rohr lagern sich Dampfteilchen aneinander — Destillat tropft in ${vessels[p.vessel]?.label || "Becherglas B"}.`, 3);
+        }
+        return;
+      }
+      const v = vessels[p.vessel];
+      if (v) {
+        const b = inner(v);
+        const cap = b.top + (b.bottom - b.top) * 0.32;
+        p.vy -= 70 * dt;
+        if (p.y > cap) p.vy -= 90 * dt;
+        p.x += (Math.random() - 0.5) * 0.4;
+        p.y += p.vy * dt;
+        if (p.y < b.top + p.r) {
+          p.y = b.top + p.r;
+          p.vy *= 0.2;
+        }
+        p.gasAge = (p.gasAge || 0) + dt;
+        if (state.distill && state.distill.from === v.id && p.gasAge > 0.7) {
+          p.vessel = "vapor";
+          p.pathT = 0;
+          return;
+        }
+        if (!state.distill && p.y < v.y - 70) {
+          p.dead = true;
+          say("Dampf entweicht. Gelöste Feststoffe bleiben zurück (Eindampfen).", 3);
         }
         return;
       }
       p.vy -= 80 * dt;
       p.y += p.vy * dt;
-      if (p.y < vessels[p.vessel]?.y - 80 || p.y < 8) {
-        p.dead = true;
-        say("Dampf entweicht. Gelöste Feststoffe bleiben zurück (Eindampfen).", 3);
-      }
+      if (p.y < 8) p.dead = true;
     });
     state.particles = state.particles.filter((p) => !p.dead);
   }
@@ -806,11 +901,23 @@
     from.restY = homeY;
     const dir = homeX + from.w / 2 <= to.x + to.w / 2 ? 1 : -1;
     from.pourDir = dir;
-    const lipOver = dir > 0 ? 0.82 : 0.18;
     job.homeX = homeX;
     job.homeY = homeY;
-    job.overX = Math.max(4, Math.min(state.W - from.w - 4, to.x + to.w * 0.5 - from.w * lipOver));
-    job.overY = Math.max(8, to.y - from.h * 0.62);
+    let overX;
+    let overY;
+    if (job.funnel) {
+      const lipOver = dir > 0 ? 0.78 : 0.22;
+      overX = to.x + to.w * 0.5 - from.w * lipOver;
+      overY = to.y - from.h * 0.38;
+    } else if (dir > 0) {
+      overX = to.x - from.w + 20;
+      overY = to.y - 4;
+    } else {
+      overX = to.x + to.w - 20;
+      overY = to.y - 4;
+    }
+    job.overX = Math.max(4, Math.min(state.W - from.w - 4, overX));
+    job.overY = Math.max(8, overY);
     job.dir = dir;
     job.spill = 0;
     job.t = 0;
@@ -892,9 +999,9 @@
 
   function spillFrom(job, dt) {
     const from = vessels[job.from];
-    if (!from || from.tilt < 0.38) return;
+    if (!from || from.tilt < 0.42) return;
     const lip = beakerLip(from);
-    job.spill = (job.spill || 0) + dt * 22;
+    job.spill = (job.spill || 0) + dt * 10;
     const cand = particlesIn(job.from)
       .filter((p) => (job.funnel ? p.phase !== "char" && !p.stuck : canDecant(p, job.from)))
       .sort((a, b) => a.y - b.y);
@@ -987,36 +1094,36 @@
       return;
     }
     from.pourDir = job.dir == null ? 1 : job.dir;
-    const LIFT = 0.55;
-    const MOVE = 0.9;
-    const BACK = 0.85;
+    const LIFT = 0.85;
+    const MOVE = 1.7;
+    const BACK = 1.15;
     const t = job.t;
+    const liftH = job.funnel ? 36 : 10;
     const layerLeft = () =>
       particlesIn(job.from).some((p) => (job.funnel ? p.phase !== "char" && !p.stuck : job.layerIds && job.layerIds[p.id]));
     if (t < LIFT) {
       const u = t / LIFT;
-      moveVessel(from, job.homeX, job.homeY - 50 * u);
-      from.tilt = 0.12 * u;
+      moveVessel(from, job.homeX, job.homeY - liftH * u);
+      from.tilt = 0.06 * u;
     } else if (t < LIFT + MOVE) {
       const u = smoothstep((t - LIFT) / MOVE);
       moveVessel(
         from,
         job.homeX + (job.overX - job.homeX) * u,
-        job.homeY - 50 + (job.overY - (job.homeY - 50)) * u
+        job.homeY - liftH + (job.overY - (job.homeY - liftH)) * u
       );
-      from.tilt = 0.12 + 0.35 * u;
-    } else if (layerLeft() && t < LIFT + MOVE + 7) {
+      from.tilt = 0.06 + 0.28 * u;
+    } else if (layerLeft() && t < LIFT + MOVE + 9) {
       moveVessel(from, job.overX, job.overY);
-      from.tilt = Math.min(0.98, 0.5 + (t - LIFT - MOVE) * 0.55);
+      from.tilt = Math.min(0.72, 0.34 + (t - LIFT - MOVE) * 0.16);
       spillFrom(job, dt);
       flyTransit(dt, job);
     } else {
       flyTransit(dt, job);
-      const pourEnd = Math.max(job.tPourEnd || t, LIFT + MOVE);
       if (!job.tPourEnd) job.tPourEnd = t;
       const u = smoothstep((t - job.tPourEnd) / BACK);
       moveVessel(from, job.overX + (job.homeX - job.overX) * u, job.overY + (job.homeY - job.overY) * u);
-      from.tilt = 0.9 * (1 - u);
+      from.tilt = 0.7 * (1 - u);
       const leftover = state.particles.some((p) => p.vessel === "transit");
       if (u >= 1 && (!leftover || t > job.tPourEnd + BACK + 1)) finishPour(job);
     }
@@ -1090,13 +1197,31 @@
     return spec.density;
   }
 
+  function isQuietSolid(p) {
+    if (p.frozen || p.phase === "char" || p.stuck) return true;
+    if (p.phase !== "solid") return false;
+    return p.r >= 6.5 || specOf(p).density <= 0.12 || specOf(p).density >= 2.2;
+  }
+
+  function clingTo(a, b) {
+    if (a.type === b.type) return true;
+    const sa = specOf(a);
+    const sb = specOf(b);
+    if (sa.mixesWith && sa.mixesWith.includes(b.type)) return true;
+    if (sb.mixesWith && sb.mixesWith.includes(a.type)) return true;
+    if (sa.solubleIn && sa.solubleIn.includes(b.type)) return true;
+    if (sb.solubleIn && sb.solubleIn.includes(a.type)) return true;
+    return false;
+  }
+
   function brownianStrength(p, temp) {
+    if (p.frozen || isQuietSolid(p)) return 0;
     if (p.r >= 6.5) return 0;
-    const heat = Math.max(0, (temp - 25) / 110);
-    if (heat < 0.04 && p.phase !== "gas") return 0;
-    if (p.phase === "gas") return 0.7 + heat * 1.2;
-    if (p.phase === "solid") return 0.012 * heat;
-    return 0.11 * heat;
+    const heat = Math.max(0, (temp - 6) / 160);
+    if (temp < 6 && p.phase !== "gas") return 0;
+    if (p.phase === "gas") return 0.28 + heat * 0.55;
+    if (p.phase === "solid") return 0.004 * heat;
+    return 0.04 * heat;
   }
 
   function collideDens(p) {
@@ -1155,12 +1280,17 @@
         return;
       }
       const b = inner(v);
-      if (p.phase === "char" || p.stuck) {
+      if (p.phase === "char" || p.stuck || p.frozen) {
         const layer = p.phase === "char" ? charLayerHeight(v.id) : 0;
         p.vx = 0;
         p.vy = 0;
         if (p.x < b.left + p.r) p.x = b.left + p.r;
         if (p.x > b.right - p.r) p.x = b.right - p.r;
+        if (p.frozen) {
+          clampInVessel(p);
+          updateMelt(p, v);
+          return;
+        }
         p.y = Math.min(b.bottom - p.r * 0.45, Math.max(b.bottom - (layer || 8) - p.r, p.y));
         if (p.y > b.bottom - p.r * 0.45) p.y = b.bottom - p.r * 0.45;
         return;
@@ -1170,7 +1300,7 @@
       const c = state.cache[v.id];
 
       if (p.phase === "gas") {
-        p.vy -= 110 * dt;
+        p.vy -= 90 * dt;
       } else if (liquidish) {
         p.vy += g * dt * 0.28;
       } else {
@@ -1182,28 +1312,34 @@
         if (p.y + p.r > surface) p.vy -= g * dt * (1.08 - dens) * 2.8;
       }
 
-      const drag = p.phase === "gas" ? 1.6 : liquidish ? 5.2 : 2.4;
+      const drag = p.phase === "gas" ? 1.8 : liquidish ? 7.4 : isQuietSolid(p) ? 8.5 : 3.2;
       p.vx *= Math.max(0, 1 - drag * dt);
       p.vy *= Math.max(0, 1 - drag * dt);
+      if (isQuietSolid(p)) {
+        p.vx *= 0.4;
+        if (p.y >= b.bottom - p.r - 0.4 || (dens < 1 && c && p.y + p.r <= (c.surfaceY || b.bottom) + 1.2)) {
+          p.vy *= 0.15;
+        }
+      }
 
       const brown = brownianStrength(p, v.temp);
       if (brown) {
         p.x += (Math.random() - 0.5) * brown;
-        p.y += (Math.random() - 0.5) * brown * 0.35;
+        p.y += (Math.random() - 0.5) * brown * 0.28;
       }
 
-      if (isPourSource(v.id) && v.tilt > 0.45) {
+      if (isPourSource(v.id) && v.tilt > 0.4) {
         const dir = v.pourDir == null ? 1 : v.pourDir;
         const pourable = state.filter ? p.phase !== "char" && !p.stuck : canDecant(p, v.id);
         if (pourable) {
-          p.vx += dir * 90 * dt;
-          p.vy -= 18 * dt;
+          p.vx += dir * 70 * dt;
+          p.vy -= 12 * dt;
         }
       }
 
       p.x += p.vx * dt;
       p.y += p.vy * dt;
-      p.rot += p.r >= 6.5 ? 0 : p.spin * dt * 0.3;
+      p.rot += p.r >= 6.5 || p.frozen ? 0 : p.spin * dt * 0.18;
       clampInVessel(p);
       if (p.y >= b.bottom - p.r && p.vy > 0) p.vy = 0;
 
@@ -1245,7 +1381,8 @@
     const key = (x, y) => x + ":" + y;
     const list = [];
     state.particles.forEach((p) => {
-      if (p.phase === "gas" || p.phase === "char" || p.adsorbedTo || p.stuck) return;
+      if (p.phase === "gas" || p.phase === "char" || p.adsorbedTo || p.stuck || p.frozen) return;
+      if (isQuietSolid(p)) return;
       if (p.vessel === "vapor" || p.vessel === "transit" || p.vessel === "funnel" || p.vessel === "magnet") return;
       p._dx = 0;
       p._dy = 0;
@@ -1276,11 +1413,22 @@
             const b = bucket[j];
             if (b.id <= a.id || a.vessel !== b.vessel) continue;
             const bLiq = b.phase === "liquid" || b.phase === "dissolved";
-            const pad = aLiq && bLiq ? 1.35 : 1.05;
+            const cling = aLiq && bLiq && clingTo(a, b);
+            const bounce = aLiq && bLiq && !cling;
+            const pad = bounce ? 1.55 : cling ? 1.08 : 1.2;
             const min = (a.r + b.r) * pad;
             const dx = b.x - a.x;
             const dy = b.y - a.y;
             const d2 = dx * dx + dy * dy;
+            if (cling && d2 > min * min && d2 < (a.r + b.r) * (a.r + b.r) * 4.2) {
+              const dist = Math.sqrt(d2) || 0.001;
+              const pull = 0.09;
+              a._dx += (dx / dist) * pull;
+              a._dy += (dy / dist) * pull;
+              b._dx -= (dx / dist) * pull;
+              b._dy -= (dy / dist) * pull;
+              continue;
+            }
             if (d2 >= min * min) continue;
             const big = a.r >= 6.5 || b.r >= 6.5;
             const da = collideDens(a);
@@ -1306,13 +1454,13 @@
                 nx = dx / dist;
                 ny = dy / dist;
               }
-              if (Math.abs(nx) < 0.4) nx += nx >= 0 ? 0.9 : -0.9;
-              nx *= 1.4;
-              ny *= aLiq && bLiq ? 0.55 : 0.8;
+              if (bounce || Math.abs(nx) < 0.4) nx += nx >= 0 ? 0.9 : -0.9;
+              nx *= bounce ? 1.8 : 1.4;
+              ny *= cling ? 0.35 : aLiq && bLiq ? 0.5 : 0.8;
               const slen = Math.sqrt(nx * nx + ny * ny) || 1;
               nx /= slen;
               ny /= slen;
-              const push = Math.min(3.8, (min - dist) * 0.5);
+              const push = Math.min(cling ? 2.2 : 3.8, (min - dist) * (bounce ? 0.72 : cling ? 0.28 : 0.5));
               a._dx -= nx * push;
               a._dy -= ny * push;
               b._dx += nx * push;
@@ -1327,7 +1475,7 @@
       let dx = p._dx;
       let dy = p._dy;
       const len = Math.sqrt(dx * dx + dy * dy);
-      const maxPush = p.r >= 6.5 ? 2 : 5.2;
+      const maxPush = p.r >= 6.5 ? 1.2 : 3.4;
       if (len > maxPush) {
         dx = (dx / len) * maxPush;
         dy = (dy / len) * maxPush;
@@ -1371,7 +1519,8 @@
     });
     const extra = [];
     if (v.heating) extra.push("Brenner an — nochmals Brenner tippen = aus");
-    if (state.distill) extra.push("Destillation aufgebaut");
+    if (v.cooling) extra.push("Kühlen an — Raumtemperatur sinkt");
+    if (state.distill) extra.push("Destillation: Trichter und Rohr");
     if (state.particles.some((p) => p.vessel === "funnel")) extra.push("Rückstand im Filter — Filter tippen");
     observeEl.textContent = `${v.label}, ${Math.round(v.temp)} °C: ${bits.join(" · ")}${extra.length ? " — " + extra.join(", ") : ""}`;
   }
@@ -1582,8 +1731,32 @@
     ctx.fillText("Brenner aus", x, y + 44);
   }
 
+  function drawCooler(v) {
+    if (!v.cooling) return;
+    const bx = isPourSource(v.id) && v.restX != null ? v.restX : v.x;
+    const by = isPourSource(v.id) && v.restY != null ? v.restY : v.y;
+    const x = bx + v.w / 2;
+    const y = by + v.h + 10;
+    ctx.fillStyle = "#9ec9de";
+    ctx.fillRect(x - 22, y + 14, 44, 16);
+    ctx.fillStyle = "#d7eef8";
+    ctx.fillRect(x - 18, y + 6, 14, 14);
+    ctx.fillRect(x + 2, y + 8, 16, 12);
+    ctx.fillStyle = "#0e7ab4";
+    ctx.font = "700 11px Segoe UI";
+    ctx.textAlign = "center";
+    ctx.fillText("Kühlen aus", x, y + 44);
+  }
+
   function burnerHit(v, px, py) {
     if (!v.heating) return false;
+    const x = v.x + v.w / 2;
+    const y = v.y + v.h + 28;
+    return Math.hypot(px - x, py - y) < 52;
+  }
+
+  function coolerHit(v, px, py) {
+    if (!v.cooling) return false;
     const x = v.x + v.w / 2;
     const y = v.y + v.h + 28;
     return Math.hypot(px - x, py - y) < 52;
@@ -1600,12 +1773,15 @@
     ctx.moveTo(x, top);
     ctx.lineTo(x, bot);
     ctx.stroke();
-    ctx.fillStyle = v.temp > 800 ? "#f4e19c" : "#d94c3d";
+    ctx.fillStyle = v.temp < 0 ? "#3d9be9" : v.temp > 800 ? "#f4e19c" : "#d94c3d";
     ctx.beginPath();
     ctx.arc(x, bot + 6, 6, 0, Math.PI * 2);
     ctx.fill();
-    const frac = Math.max(0, Math.min(1, Math.log10(1 + v.temp) / Math.log10(1 + TEMP_MAX)));
-    ctx.strokeStyle = v.temp > 800 ? "#f4e19c" : "#d94c3d";
+    const frac =
+      v.temp <= ROOM
+        ? Math.max(0.04, ((v.temp - TEMP_MIN) / (ROOM - TEMP_MIN)) * 0.22)
+        : 0.22 + Math.min(0.78, Math.log10(1 + v.temp - ROOM) / Math.log10(1 + TEMP_MAX));
+    ctx.strokeStyle = v.temp < 0 ? "#3d9be9" : v.temp > 800 ? "#f4e19c" : "#d94c3d";
     ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.moveTo(x, bot);
@@ -1647,25 +1823,41 @@
     const pair = distillPair();
     if (!pair) return;
     const { a, b } = pair;
-    ctx.strokeStyle = "rgba(80,120,150,.7)";
-    ctx.lineWidth = 6;
-    ctx.lineCap = "round";
+    const ax = a.x + a.w * 0.5;
+    const bx = b.x + b.w * 0.5;
+    ctx.fillStyle = "rgba(180,210,225,.5)";
+    ctx.strokeStyle = "rgba(40,70,90,.7)";
+    ctx.lineWidth = 2.4;
     ctx.beginPath();
-    ctx.moveTo(a.x + a.w * 0.55, a.y + 10);
-    ctx.lineTo(a.x + a.w * 0.55, a.y - 52);
-    ctx.lineTo(b.x + b.w * 0.45, b.y - 52);
-    ctx.lineTo(b.x + b.w * 0.45, b.y + 18);
+    ctx.moveTo(a.x + 16, a.y + 18);
+    ctx.lineTo(a.x + a.w - 16, a.y + 18);
+    ctx.lineTo(ax + 13, a.y - 26);
+    ctx.lineTo(ax - 13, a.y - 26);
+    ctx.closePath();
+    ctx.fill();
     ctx.stroke();
-    ctx.strokeStyle = "rgba(61,155,233,.55)";
-    ctx.lineWidth = 10;
+    ctx.strokeStyle = "rgba(70,110,140,.88)";
+    ctx.lineWidth = 16;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     ctx.beginPath();
-    ctx.moveTo(b.x + b.w * 0.45 - 30, b.y - 40);
-    ctx.lineTo(b.x + b.w * 0.45 + 4, b.y + 4);
+    ctx.moveTo(ax, a.y - 24);
+    ctx.lineTo(ax, a.y - 46);
+    ctx.lineTo(bx, b.y - 46);
+    ctx.lineTo(bx, b.y + 14);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(220,232,238,.4)";
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.moveTo(ax, a.y - 24);
+    ctx.lineTo(ax, a.y - 46);
+    ctx.lineTo(bx, b.y - 46);
+    ctx.lineTo(bx, b.y + 14);
     ctx.stroke();
     ctx.fillStyle = "#0e7ab4";
     ctx.font = "700 12px Segoe UI";
     ctx.textAlign = "center";
-    ctx.fillText("Kühler", b.x + b.w * 0.45 - 48, b.y - 18);
+    ctx.fillText("Rohr", (ax + bx) / 2, Math.min(a.y, b.y) - 56);
   }
 
   function drawMagnetIcon(x, y) {
@@ -1742,6 +1934,7 @@
       applyBeakerTilt(v);
       beakerPath(v);
       ctx.clip();
+      applyBeakerTiltInv(v);
       drawCharLayer(v);
       list.forEach(drawParticle);
       ctx.restore();
@@ -1749,6 +1942,7 @@
     outside.sort((a, b) => a.y - b.y);
     outside.forEach(drawParticle);
     vesselList().forEach(drawBurner);
+    vesselList().forEach(drawCooler);
     vesselList().forEach(drawThermo);
     drawMagnet();
     ctx.fillStyle = "rgba(26,36,40,.55)";
@@ -1785,7 +1979,8 @@
     updateVapor(dt);
     applyPhysics(dt);
     solveBonds(dt);
-    collide();
+    state.tick = (state.tick || 0) + 1;
+    if (state.tick % 2 === 0) collide();
     updateCharStick();
     updateAdsorb();
     updateMagnet(dt);
@@ -1862,6 +2057,12 @@
         syncToolButtons();
         return;
       }
+      if (coolerHit(v, pos.x, pos.y)) {
+        v.cooling = false;
+        say("Kühlen aus — die Temperatur steigt wieder.", 2);
+        syncToolButtons();
+        return;
+      }
     }
 
     const a = funnelAnchor();
@@ -1898,11 +2099,14 @@
     const v = vessels[id];
     if (!v) return;
     v.heating = !v.heating;
-    if (v.heating && !v.thermo) v.thermo = true;
+    if (v.heating) {
+      v.cooling = false;
+      if (!v.thermo) v.thermo = true;
+    }
     const others = vesselList().filter((x) => x.heating && x.id !== v.id);
     let msg;
     if (v.heating && state.distill && state.distill.from !== id) {
-      msg = `Brenner unter ${v.label}. Der Kühler hängt an ${vessels[state.distill.from].label} — hier dampft es in die Luft.`;
+      msg = `Brenner unter ${v.label}. Das Rohr hängt an ${vessels[state.distill.from].label} — hier dampft es in die Luft.`;
     } else if (v.heating) {
       msg = "Brenner an. Nochmals «Brenner aus» oder die Flamme antippen.";
     } else if (others.length) {
@@ -1911,6 +2115,22 @@
       msg = "Brenner aus — die Temperatur sinkt.";
     }
     say(msg, 3.4);
+    syncToolButtons();
+  }
+
+  function toggleCool(id) {
+    if (state.t - (state.lastCoolToggle || 0) < 0.15) return;
+    state.lastCoolToggle = state.t;
+    const v = vessels[id];
+    if (!v) return;
+    v.cooling = !v.cooling;
+    if (v.cooling) {
+      v.heating = false;
+      if (!v.thermo) v.thermo = true;
+      say("Kühlen an. Die Raumtemperatur sinkt — Wasser kann gefrieren.", 3.4);
+    } else {
+      say("Kühlen aus — die Temperatur steigt wieder zur Raumtemperatur.", 2.6);
+    }
     syncToolButtons();
   }
 
@@ -1936,7 +2156,7 @@
     }
     state.distill = { from, to };
     vessels[from].thermo = true;
-    say(`Destillation: ${vessels[from].label} → ${vessels[to].label}. Jetzt Brenner unter ${vessels[from].label}.`, 4);
+    say(`Trichter auf ${vessels[from].label}, dickes Rohr nach ${vessels[to].label}. Brenner unter ${vessels[from].label}.`, 4);
   }
 
   function startMagnet(from, to) {
@@ -1956,7 +2176,7 @@
     }
     state.decant = { from, to, layerIds };
     beginPour(state.decant);
-    say(`Glas ${vessels[from].label} steht über ${vessels[to].label} — nur die obere Schicht fliesst. Nochmals Dekantieren: nächste Schicht.`, 3.8);
+    say(`Kante an Kante: ${vessels[from].label} kippt langsam. Die Oberfläche bleibt waagrecht — nur die obere Schicht fliesst.`, 3.8);
   }
 
   function startExtract(from, to) {
@@ -2005,6 +2225,10 @@
     }
     if (id === "heat") {
       toggleHeat(from);
+      return;
+    }
+    if (id === "cool") {
+      toggleCool(from);
       return;
     }
     if (id === "thermo") {
@@ -2058,6 +2282,7 @@
     if (!vessels.A) vessels.A = makeVessel("A", "Becherglas A");
     vessels.A.temp = ROOM;
     vessels.A.heating = false;
+    vessels.A.cooling = false;
     vessels.A.thermo = false;
     vessels.A.tilt = 0;
     vessels.A.pourDir = 1;
@@ -2094,7 +2319,7 @@
       const to = ensureTarget("A");
       state.selectedTo = to;
       startDistill("A", to);
-      say("Apparatur steht. Brenner tippen: zuerst 78 °C (Alkohol), später 100 °C (Wasser).", 5.5);
+      say("Trichter und Rohr stehen. Brenner tippen: zuerst 78 °C (Alkohol), später 100 °C (Wasser).", 5.5);
     } else if (key === "adsorb") {
       addSubstance("water", "A");
       addSubstance("ink", "A");
@@ -2108,14 +2333,21 @@
   }
 
   function syncToolButtons() {
-    const heating = !!(vessels[state.selected] && vessels[state.selected].heating);
+    const sel = vessels[state.selected];
+    const heating = !!(sel && sel.heating);
+    const cooling = !!(sel && sel.cooling);
     document.querySelectorAll(".tool").forEach((btn) => {
       const id = btn.dataset.tool;
       btn.classList.toggle("active", id === state.tool);
       btn.classList.toggle("lit", id === "heat" && heating);
+      btn.classList.toggle("frost", id === "cool" && cooling);
       if (id === "heat") {
         const name = btn.querySelector(".tool-name");
         if (name) name.textContent = heating ? "Brenner aus" : "Brenner";
+      }
+      if (id === "cool") {
+        const name = btn.querySelector(".tool-name");
+        if (name) name.textContent = cooling ? "Kühlen aus" : "Kühlen";
       }
     });
   }

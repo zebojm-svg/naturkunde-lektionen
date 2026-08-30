@@ -137,6 +137,11 @@ button {
   background: #fff1e6;
   color: var(--accent-dark);
 }
+.tool.frost {
+  border-color: #3d9be9;
+  background: #e4f3fb;
+  color: #0a5a86;
+}
 .tool:hover { border-color: #c5dce8; }
 
 .stage-wrap {

@@ -327,6 +327,7 @@ window.TOOLS = [
   { id: "pointer", name: "Auswählen", icon: "👆" },
   { id: "stir", name: "Rühren", icon: "🥄" },
   { id: "heat", name: "Brenner", icon: "🔥" },
+  { id: "cool", name: "Kühlen", icon: "❄️" },
   { id: "thermo", name: "Thermometer", icon: "🌡️" },
   { id: "filter", name: "Filtrieren", icon: "▽" },
   { id: "distill", name: "Destillieren", icon: "⚗" },
