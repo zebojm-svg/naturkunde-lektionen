@@ -301,12 +301,11 @@
       return;
     }
     const b = inner(v);
-    if (spec.phase === "liquid" || spec.phase === "dissolved") {
-      const c = state.cache[vesselId];
-      if (c && c.liquids && c.liquids.length > 20 && c.surfaceY && c.surfaceY < b.top + 22) {
-        if (!quiet) say("Dieses Glas ist voll — zuerst etwas abgiessen oder in ein neues Glas filtrieren.", 2.6);
-        return;
-      }
+    const c = state.cache[vesselId];
+    const liquidish = spec.phase === "liquid" || spec.phase === "dissolved";
+    if (liquidish && c && c.surfaceY && c.surfaceY < b.top + 24) {
+      if (!quiet) say("Dieses Glas ist voll — zuerst etwas abgiessen oder in ein neues Glas filtrieren.", 2.6);
+      return;
     }
     const n = Math.round(spec.count * (amountScale || 1));
     const clusterN = spec.cluster || 1;
@@ -314,9 +313,11 @@
     while (made < n) {
       const take = Math.min(clusterN, n - made);
       const cx = b.left + 16 + Math.random() * (b.right - b.left - 32);
-      const liquidish = spec.phase === "liquid" || spec.phase === "dissolved";
+      const surface = liquidish && c && c.liquids && c.liquids.length && c.surfaceY
+        ? c.surfaceY
+        : b.bottom;
       const cy = liquidish
-        ? b.top + (b.bottom - b.top) * 0.42 + Math.random() * (b.bottom - b.top) * 0.42
+        ? Math.max(b.top + 14, Math.min(b.bottom - 12, surface - 8 - Math.random() * 24))
         : b.top + 24 + Math.random() * 70;
       const group = [];
       for (let i = 0; i < take; i++) {
@@ -1302,7 +1303,9 @@
       if (p.phase === "gas") {
         p.vy -= 90 * dt;
       } else if (liquidish) {
-        p.vy += g * dt * 0.28;
+        const nLiq = c && c.liquids ? c.liquids.length : 0;
+        const stacked = nLiq * (p.r * 2) > (b.right - b.left);
+        p.vy += g * dt * (stacked ? 0.09 : 0.16);
       } else {
         p.vy += g * dt;
       }
@@ -1386,6 +1389,7 @@
       if (p.vessel === "vapor" || p.vessel === "transit" || p.vessel === "funnel" || p.vessel === "magnet") return;
       p._dx = 0;
       p._dy = 0;
+      p._hit = 0;
       list.push(p);
     });
     const grid = new Map();
@@ -1413,20 +1417,21 @@
             const b = bucket[j];
             if (b.id <= a.id || a.vessel !== b.vessel) continue;
             const bLiq = b.phase === "liquid" || b.phase === "dissolved";
-            const cling = aLiq && bLiq && clingTo(a, b);
-            const bounce = aLiq && bLiq && !cling;
-            const pad = bounce ? 1.55 : cling ? 1.08 : 1.2;
+            const bothLiq = aLiq && bLiq;
+            const cling = bothLiq && clingTo(a, b);
+            const bounce = bothLiq && !cling;
+            const pad = bounce ? 1.5 : bothLiq ? 1.22 : 1.12;
             const min = (a.r + b.r) * pad;
             const dx = b.x - a.x;
             const dy = b.y - a.y;
             const d2 = dx * dx + dy * dy;
-            if (cling && d2 > min * min && d2 < (a.r + b.r) * (a.r + b.r) * 4.2) {
+            if (cling && d2 > min * min && d2 < (a.r + b.r) * (a.r + b.r) * 3.4) {
               const dist = Math.sqrt(d2) || 0.001;
-              const pull = 0.09;
+              const pull = 0.006;
               a._dx += (dx / dist) * pull;
-              a._dy += (dy / dist) * pull;
+              a._dy += (dy / dist) * pull * 0.12;
               b._dx -= (dx / dist) * pull;
-              b._dy -= (dy / dist) * pull;
+              b._dy -= (dy / dist) * pull * 0.12;
               continue;
             }
             if (d2 >= min * min) continue;
@@ -1434,7 +1439,42 @@
             const da = collideDens(a);
             const db = collideDens(b);
             const dd = db - da;
-            if (dd > 0.08) {
+            let dist = Math.sqrt(d2);
+            let nx;
+            let ny;
+            if (dist < 0.001) {
+              nx = (a.id & 1) ? 1 : -1;
+              ny = 0;
+              dist = 0.001;
+            } else {
+              nx = dx / dist;
+              ny = dy / dist;
+            }
+            if (bothLiq) {
+              const overlap = min - dist;
+              if (Math.abs(dd) > 0.08) {
+                if (dd > 0.08) {
+                  a._dy -= (big ? 0.7 : 0.9) * (da < 0.2 ? 2.4 : 1.1);
+                  b._dy += 0.4;
+                } else {
+                  b._dy -= (big ? 0.7 : 0.9) * (db < 0.2 ? 2.4 : 1.1);
+                  a._dy += 0.4;
+                }
+              }
+              if (Math.abs(dx) < 0.25) nx += (a.id & 1) ? 1 : -1;
+              nx *= 1.4;
+              ny *= 0.55;
+              const slen = Math.sqrt(nx * nx + ny * ny) || 1;
+              nx /= slen;
+              ny /= slen;
+              const push = Math.min(3.8, overlap * 0.5);
+              a._dx -= nx * push;
+              a._dy -= ny * push;
+              b._dx += nx * push;
+              b._dy += ny * push;
+              a._hit = 1;
+              b._hit = 1;
+            } else if (dd > 0.08) {
               const k = big ? 0.7 : 0.9;
               a._dy -= k * (da < 0.2 ? 2.4 : 1.3);
               b._dy += k * 0.5;
@@ -1443,24 +1483,13 @@
               b._dy -= k * (db < 0.2 ? 2.4 : 1.3);
               a._dy += k * 0.5;
             } else {
-              let dist = Math.sqrt(d2);
-              let nx;
-              let ny;
-              if (dist < 0.001) {
-                nx = (a.id & 1) ? 1 : -1;
-                ny = 0;
-                dist = 0.001;
-              } else {
-                nx = dx / dist;
-                ny = dy / dist;
-              }
-              if (bounce || Math.abs(nx) < 0.4) nx += nx >= 0 ? 0.9 : -0.9;
-              nx *= bounce ? 1.8 : 1.4;
-              ny *= cling ? 0.35 : aLiq && bLiq ? 0.5 : 0.8;
+              if (Math.abs(nx) < 0.4) nx += nx >= 0 ? 0.9 : -0.9;
+              nx *= 1.4;
+              ny *= 0.8;
               const slen = Math.sqrt(nx * nx + ny * ny) || 1;
               nx /= slen;
               ny /= slen;
-              const push = Math.min(cling ? 2.2 : 3.8, (min - dist) * (bounce ? 0.72 : cling ? 0.28 : 0.5));
+              const push = Math.min(3.8, (min - dist) * 0.5);
               a._dx -= nx * push;
               a._dy -= ny * push;
               b._dx += nx * push;
@@ -1475,16 +1504,23 @@
       let dx = p._dx;
       let dy = p._dy;
       const len = Math.sqrt(dx * dx + dy * dy);
-      const maxPush = p.r >= 6.5 ? 1.2 : 3.4;
+      const maxPush = p.r >= 6.5 ? 2 : 5;
       if (len > maxPush) {
         dx = (dx / len) * maxPush;
         dy = (dy / len) * maxPush;
       }
+      const wantX = p.x + dx;
       p.x += dx;
       p.y += dy;
       p._dx = 0;
       p._dy = 0;
       clampInVessel(p);
+      const liquidish = p.phase === "liquid" || p.phase === "dissolved";
+      if (liquidish && Math.abs(p.x - wantX) > 0.15) {
+        p.y -= Math.abs(p.x - wantX);
+        clampInVessel(p);
+      }
+      if (liquidish && p._hit && p.vy > 0) p.vy *= 0.18;
     }
   }
 
@@ -1979,8 +2015,8 @@
     updateVapor(dt);
     applyPhysics(dt);
     solveBonds(dt);
-    state.tick = (state.tick || 0) + 1;
-    if (state.tick % 2 === 0) collide();
+    collide();
+    if (state.particles.length > 56) collide();
     updateCharStick();
     updateAdsorb();
     updateMagnet(dt);
